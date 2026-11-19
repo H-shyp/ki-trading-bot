@@ -70,9 +70,36 @@ async function saveAll(D) {
 const addLog = (D, type, o) => D.log.push({ t: Date.now(), type, ...o });
 
 /* ================= Kursdaten ================= */
+// Kraken: Paarnamen einmal laden und merken (BTC heißt dort XBT, DOGE heißt XDG)
+const KR_ALIAS = { BTC: "XBT", DOGE: "XDG" };
+let krMap = null, krMapAt = 0;
+async function krakenPairs() {
+  if (krMap && Date.now() - krMapAt < 6 * 3600e3) return krMap;
+  const r = await fetchT("https://api.kraken.com/0/public/AssetPairs", 10000);
+  if (!r.ok) throw new Error("Kraken " + r.status);
+  const j = await r.json(); if (j.error && j.error.length) throw new Error("Kraken " + j.error[0]);
+  const m = {};
+  for (const [key, p] of Object.entries(j.result || {})) {
+    if (!p.wsname || !p.wsname.endsWith("/USD")) continue;
+    const base = p.wsname.split("/")[0];
+    const sym = Object.keys(KR_ALIAS).find((k) => KR_ALIAS[k] === base) || base;
+    m[sym] = { key, alt: p.altname };
+  }
+  krMap = m; krMapAt = Date.now(); return m;
+}
+async function pricesKraken(syms) {
+  const m = await krakenPairs(); const have = syms.filter((s) => m[s]); if (!have.length) return {};
+  const r = await fetchT("https://api.kraken.com/0/public/Ticker?pair=" + have.map((s) => m[s].alt).join(","));
+  if (!r.ok) throw new Error("Kraken " + r.status);
+  const j = await r.json(); if (j.error && j.error.length) throw new Error("Kraken " + j.error[0]);
+  const data = {};
+  for (const s of have) { const d = j.result[m[s].key] || j.result[m[s].alt]; if (d && d.c) data[s] = { price: +d.c[0], ref: +d.o || +d.c[0] }; }
+  return data;
+}
+let binDownUntil = 0;
 async function fetchPrices(syms) {
   const errs = [];
-  for (const h of BINANCE) {
+  for (const h of (Date.now() < binDownUntil ? [] : BINANCE)) {
     try {
       const r = await fetchT(`${h}/api/v3/ticker/24hr?type=MINI&symbols=${encodeURIComponent(JSON.stringify(syms.map((s) => s + "USDT")))}`);
       if (r.status === 400) { // ungültiges Symbol in der Liste → einzeln prüfen
@@ -86,6 +113,12 @@ async function fetchPrices(syms) {
       return { src: "Binance", data: Object.fromEntries(arr.map((d) => [d.symbol.replace(/USDT$/, ""), { price: +d.lastPrice, ref: +d.openPrice }])) };
     } catch (e) { errs.push(h + " " + (e.name || "Fehler")); }
   }
+  if (Date.now() >= binDownUntil) binDownUntil = Date.now() + 30 * 60000; // Binance 30 Min. nicht erneut versuchen
+  try {
+    const data = await pricesKraken(syms);
+    if (Object.keys(data).length) return { src: "Kraken", data, note: errs.join(", ") };
+    errs.push("Kraken leer");
+  } catch (e) { errs.push(String(e.message || e.name || "Kraken Fehler")); }
   try {
     const r = await fetchT(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${syms.join(",")}&tsyms=USD`);
     if (r.ok) {
@@ -112,6 +145,13 @@ async function klinesBinance(h, s) {
   if (!r.ok) return null;
   return (await r.json()).slice(0, -1).map((k) => [Math.floor(k[0] / 60000) + 1, +k[4]]); // laufende Minute weglassen
 }
+async function klinesKraken(s) {
+  const m = await krakenPairs(); if (!m[s]) return null;
+  const r = await fetchT(`https://api.kraken.com/0/public/OHLC?pair=${m[s].alt}&interval=1`);
+  if (!r.ok) return null;
+  const j = await r.json(); const rows = j.result && (j.result[m[s].key] || j.result[m[s].alt]); if (!rows) return null;
+  return rows.slice(-(MAXBARS + 1), -1).map((k) => [Math.floor(k[0] / 60) + 1, +k[4]]); // laufende Minute weglassen
+}
 async function klinesCC(s) {
   const r = await fetchT(`https://min-api.cryptocompare.com/data/v2/histominute?fsym=${s}&tsym=USD&limit=${MAXBARS}`);
   if (!r.ok) return null;
@@ -122,6 +162,7 @@ async function warmup(D, syms) {
   // Quelle mit dem ersten Coin bestimmen (spart Abrufe – Cloudflare erlaubt nur 50 pro Runde)
   let load = null;
   for (const h of BINANCE) { try { if ((await klinesBinance(h, syms[0]))?.length) { load = (s) => klinesBinance(h, s); break; } } catch (_) { /* weiter */ } }
+  if (!load) { try { if ((await klinesKraken(syms[0]))?.length) load = klinesKraken; } catch (_) { /* weiter */ } }
   if (!load) { try { if ((await klinesCC(syms[0]))?.length) load = klinesCC; } catch (_) { /* weiter */ } }
   if (!load) return 0;
   const series = {}; let base = null;
@@ -278,7 +319,7 @@ async function tick(force = false) {
     const syms = st.cfg.symbols;
     // Verlauf aufbauen (beim ersten Start oder nach Änderung der Symbole)
     const have = Object.keys(D.bars.s);
-    if ((!D.bars.t.length || syms.some((s) => !have.includes(s))) && now - (st.lastWarm || 0) > 10 * 60000) {
+    if ((!D.bars.t.length || syms.some((s) => !have.includes(s))) && now - (st.lastWarm || 0) > 3 * 60000) {
       st.lastWarm = now;
       const n = await warmup(D, syms);
       if (n) addLog(D, "INFO", { msg: `Kursverlauf der letzten 2 Stunden für ${n} Coins geladen – der Bot kann sofort bewerten.` });

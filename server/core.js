@@ -10,16 +10,19 @@ export function makeBot(io) {
 const env = (k) => String(io.env(k) || "").trim();
 
 /* ================= Einstellungen ================= */
-const SYMS_DEF = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "TRX",
-  "POL", "SHIB", "ATOM", "NEAR", "UNI", "ARB", "OP", "SUI", "PEPE", "APT", "INJ", "FIL"];
+const SYMS_DEF = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "TRX", "POL", "SHIB",
+  "ATOM", "NEAR", "UNI", "ARB", "OP", "SUI", "PEPE", "APT", "INJ", "FIL", "BCH", "XLM", "ETC", "HBAR", "AAVE",
+  "RENDER", "WIF", "BONK", "SEI", "TIA", "ALGO", "FET", "TAO", "ICP", "TON", "ENA", "ONDO", "JUP", "PYTH", "LDO",
+  "GRT", "SAND", "MANA", "CRV", "FLOKI", "WLD", "STX", "IMX", "RUNE", "XTZ", "QNT", "GALA", "APE", "CHZ", "ENS",
+  "ZEC", "TRUMP", "KAS", "VET"];
 const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin",
   AVAX: "avalanche-2", LINK: "chainlink", DOT: "polkadot", LTC: "litecoin", TRX: "tron", POL: "polygon-ecosystem-token",
   SHIB: "shiba-inu", ATOM: "cosmos", NEAR: "near", UNI: "uniswap", ARB: "arbitrum", OP: "optimism", SUI: "sui", PEPE: "pepe",
   APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
-const DEF_CFG = { startCash: 500, maxPosPct: 15, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
-  buyTh: 0.35, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
+const DEF_CFG = { startCash: 500, maxPosPct: 12, maxPositions: 8, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+  buyTh: 0.3, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
 const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
 const BINANCE = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
@@ -60,9 +63,12 @@ async function loadAll() {
   const s = v.st ? { ...freshState(), ...v.st } : freshState();
   s.cfg = { ...DEF_CFG, ...(s.cfg || {}) };
   if (!s.cfgV || s.cfgV < 2) { s.cfg.buyTh = Math.max(s.cfg.buyTh, DEF_CFG.buyTh); s.cfg.sellTh = Math.min(s.cfg.sellTh, DEF_CFG.sellTh); s.cfgV = 2; normW(s); }
+  if (s.cfgV >= 3 && s.cfgV < 4) {
+    s.cfg.symbols = SYMS_DEF; s.cfg.maxPositions = DEF_CFG.maxPositions; s.cfg.maxPosPct = DEF_CFG.maxPosPct; s.cfg.buyTh = DEF_CFG.buyTh; s.cfgV = 4;
+  }
   if (s.cfgV < 3) { // Neustart mit 500 $ Spielgeld (Wunsch vom 19.11.); das Gelernte der KI bleibt
     const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm };
-    const n = { ...freshState({ ...s.cfg, startCash: 500 }), ...keep, cfgV: 3 };
+    const n = { ...freshState({ ...s.cfg, ...DEF_CFG, startCash: 500 }), ...keep, cfgV: 4 };
     return { st: n, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
       log: [{ t: Date.now(), type: "INFO", msg: "Neues Depot mit 500,00 $ Spielgeld gestartet. Das Gelernte der KI bleibt erhalten." }] };
   }
@@ -165,25 +171,22 @@ async function klinesCC(s) {
   const j = await r.json(); const rows = j && j.Data && j.Data.Data; if (!rows || !rows.length) return null;
   return rows.filter((k) => k.close > 0).map((k) => [Math.floor(k.time / 60) + 1, +k.close]);
 }
-async function warmup(D, syms) {
-  // Quelle mit dem ersten Coin bestimmen (spart Abrufe – Cloudflare erlaubt nur 50 pro Runde)
+async function warmup(D, need, syms, st) {
+  // Lädt den Verlauf schrittweise: höchstens 25 Coins pro Runde (Cloudflare erlaubt 50 Abrufe pro Runde)
   let load = null;
-  for (const h of BINANCE) { try { if ((await klinesBinance(h, syms[0]))?.length) { load = (s) => klinesBinance(h, s); break; } } catch (_) { /* weiter */ } }
-  if (!load) { try { if ((await klinesKraken(syms[0]))?.length) load = klinesKraken; } catch (_) { /* weiter */ } }
-  if (!load) { try { if ((await klinesCC(syms[0]))?.length) load = klinesCC; } catch (_) { /* weiter */ } }
-  if (!load) return 0;
-  const series = {}; let base = null;
-  for (const s of syms) {
-    try {
-      const rows = await load(s); if (!rows || !rows.length) continue;
-      series[s] = new Map(rows);
-      if (!base || rows.length > base.length) base = rows.map((x) => x[0]);
-    } catch (_) { /* Coin überspringen */ }
+  if (Date.now() >= binDownUntil) for (const h of BINANCE) { try { if ((await klinesBinance(h, need[0]))?.length) { load = (x) => klinesBinance(h, x); break; } } catch (_) { /* weiter */ } }
+  if (!load) { try { const m = await krakenPairs(); need = need.filter((x) => m[x]); if (need.length) load = klinesKraken; } catch (_) { /* weiter */ } }
+  if (!load || !need.length) return 0;
+  const series = {}; const now = Date.now();
+  for (const x of need.slice(0, 25)) {
+    st.warmTry[x] = now;
+    try { const rows = await load(x); if (rows && rows.length) series[x] = new Map(rows); } catch (_) { /* Coin überspringen */ }
   }
-  if (!base) return 0;
-  D.bars.t = base;
-  D.bars.s = Object.fromEntries(syms.map((s) => [s, base.map((m) => (series[s] ? r7(series[s].get(m)) : null))]));
-  return Object.keys(series).length;
+  const got = Object.keys(series); if (!got.length) return 0;
+  if (!D.bars.t.length) { let base = []; for (const x of got) { const ks = [...series[x].keys()]; if (ks.length > base.length) base = ks; } D.bars.t = base.slice(-MAXBARS); }
+  for (const x of got) { const old = D.bars.s[x] || []; D.bars.s[x] = D.bars.t.map((m, i) => { const v = series[x].get(m); return v == null ? (old[i] ?? null) : r7(v); }); }
+  for (const x of syms) if (!D.bars.s[x]) D.bars.s[x] = D.bars.t.map(() => null);
+  return got.length;
 }
 
 /* ================= Analyse & KI ================= */
@@ -299,7 +302,7 @@ function botStep(D) {
   const eq = equity(D);
   const cands = Object.entries(D.an).filter(([s, a]) => a && D.prices[s] && !st.positions[s]
     && a.score >= c.buyTh && a.smooth >= c.buyTh * 0.8
-    && (!c.trendFilter || a.trend === "up")
+    && (!c.trendFilter || a.trend === "up" || (a.trend === "side" && a.smooth >= c.buyTh + 0.15))
     && a.vol * Math.sqrt(c.minHoldMin) >= fee2 * 2.5
     && (st.cool[s] || 0) <= nowMin).sort((x, y) => y[1].smooth - x[1].smooth);
   for (const [s, a] of cands) {
@@ -406,13 +409,14 @@ async function tick(force = false) {
     const D = await loadAll(); D.notes = []; const st = D.st, now = Date.now();
     if (!force && now - st.lastRun < 40000) return { skipped: true }; // doppelte Aufrufe vermeiden
     const syms = st.cfg.symbols;
-    // Verlauf aufbauen (beim ersten Start oder nach Änderung der Symbole)
-    const have = Object.keys(D.bars.s);
-    if ((!D.bars.t.length || syms.some((s) => !have.includes(s))) && now - (st.lastWarm || 0) > 3 * 60000) {
+    // Verlauf für Coins ohne Daten nachladen (beim Start oder wenn neue Coins dazukommen)
+    st.warmTry = st.warmTry || {};
+    const need = syms.filter((x) => (D.bars.s[x] || []).filter((v) => v != null).length < WARM && now - (st.warmTry[x] || 0) > 30 * 60000);
+    if (need.length && now - (st.lastWarm || 0) > 50000) {
       st.lastWarm = now;
-      const n = await warmup(D, syms);
-      if (n) addLog(D, "INFO", { msg: `Kursverlauf der letzten 2 Stunden für ${n} Coins geladen – der Bot kann sofort bewerten.` });
-      else { D.bars = { t: [], s: Object.fromEntries(syms.map((s) => [s, []])) }; addLog(D, "INFO", { msg: "Kein Kursverlauf verfügbar – der Bot sammelt jetzt 30 Minuten Daten, bevor er handelt." }); }
+      const n = await warmup(D, need, syms, st);
+      if (n) addLog(D, "INFO", { msg: `Kursverlauf der letzten 2 Stunden für ${n} Coins geladen – der Bot kann sie sofort bewerten.` });
+      else if (!D.bars.t.length && !st.noHistLogged) { st.noHistLogged = true; addLog(D, "INFO", { msg: "Kein Kursverlauf verfügbar – der Bot sammelt jetzt 30 Minuten Daten, bevor er handelt." }); }
     }
     // Aktuelle Kurse
     const pr = await fetchPrices(syms); D.prices = pr.data;

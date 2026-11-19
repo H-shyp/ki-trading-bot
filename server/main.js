@@ -1,0 +1,370 @@
+// KI Trading Bot – Server für Deno Deploy (läuft im Hintergrund, jede Minute)
+// Paper-Trading mit Spielgeld auf Basis echter Krypto-Kurse.
+//
+// Umgebungsvariablen (im Deno-Dashboard eintragen):
+//   NTFY_TOPIC  – Kanalname für Handy-Nachrichten über die App „ntfy“ (geheim halten)
+//   BOT_KEY     – Schlüssel, mit dem die Web-App den Bot steuern darf (geheim halten)
+
+const env = (k) => (Deno.env.get(k) || "").trim();
+const kv = await Deno.openKv();
+
+/* ================= Einstellungen ================= */
+const SYMS_DEF = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "TRX",
+  "POL", "SHIB", "ATOM", "NEAR", "UNI", "ARB", "OP", "SUI", "PEPE", "APT", "INJ", "FIL"];
+const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin",
+  AVAX: "avalanche-2", LINK: "chainlink", DOT: "polkadot", LTC: "litecoin", TRX: "tron", POL: "polygon-ecosystem-token",
+  SHIB: "shiba-inu", ATOM: "cosmos", NEAR: "near", UNI: "uniswap", ARB: "arbitrum", OP: "optimism", SUI: "sui", PEPE: "pepe",
+  APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
+  ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
+  SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
+const DEF_CFG = { startCash: 10000, maxPosPct: 15, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+  buyTh: 0.3, sellTh: -0.15, trendFilter: true, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
+const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
+const H = 3, WARM = 30, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
+const BINANCE = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
+
+/* ================= Helfer ================= */
+const nf = (v, d = 2) => Number(v).toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
+const money = (v) => nf(v, 2) + " $";
+const smoney = (v) => (v >= 0 ? "+" : "−") + nf(Math.abs(v), 2) + " $";
+const pct = (v) => (v >= 0 ? "+" : "−") + nf(Math.abs(v * 100), 2) + " %";
+const sc = (v) => (v >= 0 ? "+" : "−") + nf(Math.abs(v), 2);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const sigm = (z) => 1 / (1 + Math.exp(-clamp(z, -30, 30)));
+const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+const r7 = (v) => (v == null ? null : Number(Number(v).toPrecision(7)));
+function fp(p) { const a = Math.abs(p); return nf(p, a >= 10 ? 2 : a >= 1 ? 3 : a >= 0.01 ? 5 : 8); }
+function fq(q) { if (q >= 1000) return nf(q, 0); if (q >= 1) return Number.isInteger(q) ? nf(q, 0) : nf(q, 3); return nf(q, 6); }
+function dur(ms) { const m = Math.round(ms / 60000); if (m < 60) return m + " Min."; const h = Math.floor(m / 60); return h + " Std. " + (m % 60) + " Min."; }
+async function fetchT(url, ms = 8000, opt = {}) {
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, { ...opt, signal: ac.signal }); } finally { clearTimeout(t); }
+}
+function berlin(ts) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+    .formatToParts(new Date(ts)).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, hour: +p.hour % 24, time: `${p.hour}:${p.minute}` };
+}
+
+/* ================= Speicher (Deno KV, max. 64 KB pro Eintrag) ================= */
+function freshState(cfg = DEF_CFG) {
+  return { cfg: { ...cfg }, cash: cfg.startCash, positions: {}, W: EXPERTS.map(() => 1 / EXPERTS.length),
+    acc: EXPERTS.map(() => ({ h: 0, n: 0 })), ai: [0, 0, 0, 0, 0, 0, 0], learnSteps: 0, paused: false,
+    createdAt: Date.now(), lastRun: 0, source: "", srcErr: "", cool: {}, stats: { sells: 0, wins: 0, realized: 0, sumWin: 0, sumLoss: 0 },
+    day: null, lastDaily: "", lastWarm: 0 };
+}
+async function loadAll() {
+  const [st, bars, trades, log, eq] = await kv.getMany([["st"], ["bars"], ["trades"], ["log"], ["eq"]]);
+  const s = st.value ? { ...freshState(), ...st.value } : freshState();
+  s.cfg = { ...DEF_CFG, ...(s.cfg || {}) };
+  return { st: s, bars: bars.value || { t: [], s: {}, ref: {} }, trades: trades.value || [], log: log.value || [], eq: eq.value || [] };
+}
+async function saveAll(D) {
+  if (D.trades.length > 100) D.trades = D.trades.slice(-100);
+  if (D.log.length > 80) D.log = D.log.slice(-80);
+  if (D.eq.length > 1400) { const old = D.eq.slice(0, 700).filter((_, i) => i % 2 === 0); D.eq = old.concat(D.eq.slice(700)); }
+  await kv.atomic().set(["st"], D.st).set(["bars"], D.bars).set(["trades"], D.trades).set(["log"], D.log).set(["eq"], D.eq).commit();
+}
+const addLog = (D, type, o) => D.log.push({ t: Date.now(), type, ...o });
+
+/* ================= Kursdaten ================= */
+async function fetchPrices(syms) {
+  const errs = [];
+  for (const h of BINANCE) {
+    try {
+      const r = await fetchT(`${h}/api/v3/ticker/24hr?type=MINI&symbols=${encodeURIComponent(JSON.stringify(syms.map((s) => s + "USDT")))}`);
+      if (r.status === 400) { // ungültiges Symbol in der Liste → einzeln prüfen
+        const ok = [];
+        for (const s of syms) { const q = await fetchT(`${h}/api/v3/ticker/24hr?type=MINI&symbol=${s}USDT`); if (q.ok) { const d = await q.json(); ok.push(d); } }
+        if (ok.length) return { src: "Binance", data: Object.fromEntries(ok.map((d) => [d.symbol.replace(/USDT$/, ""), { price: +d.lastPrice, ref: +d.openPrice }])) };
+        errs.push(h + " 400"); continue;
+      }
+      if (!r.ok) { errs.push(h + " " + r.status); continue; }
+      const arr = await r.json();
+      return { src: "Binance", data: Object.fromEntries(arr.map((d) => [d.symbol.replace(/USDT$/, ""), { price: +d.lastPrice, ref: +d.openPrice }])) };
+    } catch (e) { errs.push(h + " " + (e.name || "Fehler")); }
+  }
+  try {
+    const ids = [...new Set(syms.map((s) => CG[s]).filter(Boolean))];
+    const r = await fetchT(`https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd&include_24hr_change=true`);
+    if (r.ok) {
+      const j = await r.json(); const data = {};
+      for (const s of syms) { const d = j[CG[s]]; if (d && d.usd) data[s] = { price: d.usd, ref: d.usd / (1 + (d.usd_24h_change || 0) / 100) }; }
+      if (Object.keys(data).length) return { src: "CoinGecko", data, note: errs.join(", ") };
+    } else errs.push("CoinGecko " + r.status);
+  } catch (e) { errs.push("CoinGecko " + (e.name || "Fehler")); }
+  return { src: "", data: {}, note: errs.join(", ") };
+}
+// Startverlauf: letzte 2 Stunden Minutenkerzen von Binance, damit der Bot sofort bewerten kann
+async function warmup(D, syms) {
+  const series = {}; let base = null;
+  for (const s of syms) {
+    for (const h of BINANCE) {
+      try {
+        const r = await fetchT(`${h}/api/v3/klines?symbol=${s}USDT&interval=1m&limit=${MAXBARS + 1}`);
+        if (!r.ok) continue;
+        const rows = (await r.json()).slice(0, -1); // letzte (laufende) Minute weglassen
+        series[s] = new Map(rows.map((k) => [Math.floor(k[0] / 60000) + 1, +k[4]]));
+        if (!base || rows.length > base.length) base = rows.map((k) => Math.floor(k[0] / 60000) + 1);
+        break;
+      } catch (_) { /* nächster Server */ }
+    }
+  }
+  if (!base) return 0;
+  D.bars.t = base;
+  D.bars.s = Object.fromEntries(syms.map((s) => [s, base.map((m) => (series[s] ? r7(series[s].get(m)) : null))]));
+  return Object.keys(series).length;
+}
+
+/* ================= Analyse & KI ================= */
+function emaArr(c, p) { const k = 2 / (p + 1); let e = c[0]; const out = [e]; for (let i = 1; i < c.length; i++) { e = c[i] * k + e * (1 - k); out.push(e); } return out; }
+function rsiCalc(c, p = 14) {
+  if (c.length < p + 1) return 50; let g = 0, l = 0;
+  for (let i = 1; i <= p; i++) { const d = c[i] - c[i - 1]; if (d > 0) g += d; else l -= d; } g /= p; l /= p;
+  for (let i = p + 1; i < c.length; i++) { const d = c[i] - c[i - 1]; g = (g * (p - 1) + Math.max(d, 0)) / p; l = (l * (p - 1) + Math.max(-d, 0)) / p; }
+  if (l === 0) return g === 0 ? 50 : 100; return 100 - 100 / (1 + g / l);
+}
+function analyze(c, st) {
+  const n = c.length; if (n < WARM) return null;
+  const eF = emaArr(c, 9), eS = emaArr(c, 21), eL = emaArr(c, 50); const p = c[n - 1];
+  const rets = []; for (let i = Math.max(1, n - 30); i < n; i++) rets.push(c[i] / c[i - 1] - 1);
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const vol = Math.max(Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length), 2e-5);
+  const rsi = rsiCalc(c.slice(-100)); const roc = p / c[n - 11] - 1;
+  const win = c.slice(n - 21, n - 1); const hi = Math.max(...win), lo = Math.min(...win);
+  const sTrend = Math.tanh((eF[n - 1] - eS[n - 1]) / eS[n - 1] / (vol * 1.5));
+  const sMom = Math.tanh(roc / (vol * Math.sqrt(10)));
+  const sRev = rsi < 30 ? Math.min(1, (30 - rsi) / 15) : rsi > 70 ? -Math.min(1, (rsi - 70) / 15) : 0;
+  let sBrk = 0;
+  if (p > hi) sBrk = Math.min(1, 0.5 + (p / hi - 1) / vol * 0.25); else if (p < lo) sBrk = -Math.min(1, 0.5 + (1 - p / lo) / vol * 0.25); else if (hi > lo) sBrk = ((p - lo) / (hi - lo) - 0.5) * 0.4;
+  const r1 = Math.tanh((p / c[n - 2] - 1) / vol / 2);
+  const x = [sTrend, sMom, sRev, sBrk, r1, (rsi - 50) / 50, 1];
+  const pAI = sigm(dot(st.ai, x)); const sAI = Math.tanh((pAI - 0.5) * 5);
+  const ex = [sTrend, sMom, sRev, sBrk, sAI];
+  let score = 0; ex.forEach((e, i) => (score += st.W[i] * e)); score /= st.W.reduce((a, b) => a + b, 0);
+  const slope = (eL[n - 1] - eL[n - 6]) / eL[n - 6];
+  let trend = "side";
+  if (eF[n - 1] > eS[n - 1] && eS[n - 1] > eL[n - 1] && slope > 0) trend = "up";
+  else if (eF[n - 1] < eS[n - 1] && eS[n - 1] < eL[n - 1] && slope < 0) trend = "down";
+  return { p, vol, rsi, ex, x, score: clamp(score, -1, 1), trend, pAI };
+}
+function normW(st) {
+  let s = st.W.reduce((a, b) => a + b, 0); st.W = st.W.map((w) => Math.max(w / s, 0.04));
+  s = st.W.reduce((a, b) => a + b, 0); st.W = st.W.map((w) => w / s);
+}
+function learnFrom(st, a, p1) {
+  const ret = p1 / a.p - 1; if (Math.abs(ret) < a.vol * 0.5) return;
+  const y = ret > 0 ? 1 : -1;
+  a.ex.forEach((e, i) => {
+    if (Math.abs(e) > 0.05) st.W[i] *= Math.exp(-ETA * ((1 - e * y) / 2 - 0.5));
+    if (Math.abs(e) > 0.15) { st.acc[i].n++; if ((e > 0 ? 1 : -1) === y) st.acc[i].h++; }
+  });
+  normW(st);
+  const g = sigm(dot(st.ai, a.x)) - (y > 0 ? 1 : 0);
+  for (let j = 0; j < st.ai.length; j++) st.ai[j] -= LR * (g * a.x[j] + L2 * st.ai[j]);
+  st.learnSteps++;
+}
+const closesOf = (D, s) => (D.bars.s[s] || []).filter((v) => v != null);
+const trendTxt = (t) => (t === "up" ? "↑ Aufwärts" : t === "down" ? "↓ Abwärts" : "→ Seitwärts");
+
+/* ================= Handel ================= */
+function priceOf(D, s) { return D.prices?.[s]?.price || D.st.positions[s]?.last || D.st.positions[s]?.avg; }
+function equity(D) { let v = D.st.cash; for (const [s, p] of Object.entries(D.st.positions)) v += p.qty * (priceOf(D, s) || p.avg); return v; }
+function buy(D, s, budget, reason) {
+  const st = D.st, p = D.prices[s].price, f = st.cfg.fee / 100;
+  const qty = Math.floor(budget / (p * (1 + f)) * 1e6) / 1e6; if (qty <= 0) return;
+  const cost = qty * p, fee = cost * f; if (cost + fee > st.cash + 1e-9) return;
+  st.cash -= cost + fee;
+  st.positions[s] = { qty, avg: p, t: Date.now(), peak: p, fee, last: p };
+  const tr = { t: Date.now(), side: "BUY", sym: s, qty, price: p, fee, reason };
+  D.trades.push(tr); addLog(D, "BUY", tr);
+  if (st.cfg.notifyBuys) D.notes.push({ title: `🛒 Kauf: ${s}`, msg: `${fq(qty)} × ${fp(p)} $ = ${money(cost)}\n${reason}`, tags: ["shopping_cart"], prio: 2 });
+}
+function sell(D, s, reason) {
+  const st = D.st, pos = st.positions[s]; if (!pos) return;
+  const p = priceOf(D, s), gross = pos.qty * p, fee = gross * st.cfg.fee / 100;
+  st.cash += gross - fee;
+  const pnl = gross - fee - (pos.qty * pos.avg + pos.fee), pnlPct = pnl / (pos.qty * pos.avg);
+  delete st.positions[s];
+  st.cool[s] = (D.bars.t.length ? D.bars.t[D.bars.t.length - 1] : 0) + 6; // 6 Minuten Pause für dieses Symbol
+  const S = st.stats; S.sells++; S.realized += pnl; if (pnl > 0) { S.wins++; S.sumWin += pnl; } else S.sumLoss += pnl;
+  const tr = { t: Date.now(), side: "SELL", sym: s, qty: pos.qty, price: p, fee, pnl, pnlPct, held: Date.now() - pos.t, reason };
+  D.trades.push(tr); addLog(D, "SELL", tr);
+  if (st.cfg.notifySells) {
+    const eq = equity(D), tot = eq - st.cfg.startCash;
+    D.notes.push({ title: `${pnl > 0 ? "✅ Plus" : "❌ Minus"}: ${s} ${smoney(pnl)} (${pct(pnlPct)})`,
+      msg: `${reason}\nGehalten: ${dur(Date.now() - pos.t)}\nDepot: ${money(eq)} (${smoney(tot)} gesamt)`,
+      tags: [pnl > 0 ? "white_check_mark" : "x"], prio: 3 });
+  }
+}
+function botStep(D) {
+  const st = D.st, c = st.cfg, nowMin = D.bars.t[D.bars.t.length - 1] || 0;
+  for (const s of Object.keys(st.positions)) {
+    const pos = st.positions[s], pr = D.prices[s]; if (!pr) continue;
+    const p = pr.price, a = D.an[s]; pos.last = p; pos.peak = Math.max(pos.peak, p);
+    const ch = p / pos.avg - 1; let r = null;
+    if (ch <= -c.sl / 100) r = `Stop-Loss ausgelöst (${pct(ch)})`;
+    else if (ch >= c.tp / 100) r = `Gewinnziel erreicht (${pct(ch)})`;
+    else if (c.trail > 0 && pos.peak / pos.avg - 1 >= c.trail / 100 && p <= pos.peak * (1 - c.trail / 100)) r = `Trailing-Stop: ${nf(c.trail, 1)} % unter dem Hoch – Gewinn gesichert (${pct(ch)})`;
+    else if (a && a.score <= c.sellTh) r = `KI-Signal dreht negativ (Score ${sc(a.score)})`;
+    else if (a && c.trendFilter && a.trend === "down" && a.score < 0) r = `Abwärtstrend erkannt (Score ${sc(a.score)})`;
+    if (r) sell(D, s, r);
+  }
+  if (st.paused) return;
+  const eq = equity(D);
+  const cands = Object.entries(D.an).filter(([s, a]) => a && D.prices[s] && !st.positions[s] && a.score >= c.buyTh
+    && (st.cool[s] || 0) <= nowMin && !(c.trendFilter && a.trend === "down")).sort((x, y) => y[1].score - x[1].score);
+  for (const [s, a] of cands) {
+    if (Object.keys(st.positions).length >= c.maxPositions) break;
+    const strength = clamp((a.score - c.buyTh) / Math.max(0.05, 1 - c.buyTh), 0, 1);
+    const budget = Math.min(eq * c.maxPosPct / 100 * (0.6 + 0.4 * strength), st.cash);
+    if (budget < Math.max(10, eq * 0.01)) break;
+    let bi = 0, bv = -9; a.ex.forEach((e, i) => { const v = st.W[i] * e; if (v > bv) { bv = v; bi = i; } });
+    buy(D, s, budget, `KI-Score ${sc(a.score)} · Trend ${trendTxt(a.trend)} · RSI ${nf(a.rsi, 0)} · stärkstes Signal: ${EXPERTS[bi]} (${sc(a.ex[bi])})`);
+  }
+}
+
+/* ================= Benachrichtigungen (ntfy) ================= */
+async function notify(n) {
+  const topic = env("NTFY_TOPIC"); if (!topic) return false;
+  try {
+    const r = await fetchT("https://ntfy.sh/", 8000, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, title: n.title, message: n.msg, tags: n.tags || [], priority: n.prio || 3 }) });
+    return r.ok;
+  } catch (_) { return false; }
+}
+function dailyCheck(D) {
+  const st = D.st, b = berlin(Date.now()), eq = equity(D);
+  if (!st.day || st.day.date !== b.date) st.day = { date: b.date, eq };
+  if (b.hour >= st.cfg.dailyHour && st.lastDaily !== b.date) {
+    st.lastDaily = b.date;
+    const todays = D.trades.filter((t) => t.side === "SELL" && berlin(t.t).date === b.date);
+    const pnl = eq - st.day.eq, wins = todays.filter((t) => t.pnl > 0).length;
+    D.notes.push({ title: `📊 Tagesbilanz: ${smoney(pnl)} (${pct(pnl / st.day.eq)})`,
+      msg: `${todays.length} Trades heute, davon ${wins} im Plus.\nDepot: ${money(eq)} · gesamt ${smoney(eq - st.cfg.startCash)} (${pct((eq - st.cfg.startCash) / st.cfg.startCash)})\nOffene Positionen: ${Object.keys(st.positions).length}`,
+      tags: ["bar_chart"], prio: 3 });
+  }
+}
+
+/* ================= Ein Durchlauf (jede Minute) ================= */
+let running = false;
+async function tick(force = false) {
+  if (running) return { skipped: true }; running = true;
+  try {
+    const D = await loadAll(); D.notes = []; const st = D.st, now = Date.now();
+    if (!force && now - st.lastRun < 40000) return { skipped: true }; // doppelte Aufrufe vermeiden
+    const syms = st.cfg.symbols;
+    // Verlauf aufbauen (beim ersten Start oder nach Änderung der Symbole)
+    const have = Object.keys(D.bars.s);
+    if ((!D.bars.t.length || syms.some((s) => !have.includes(s))) && now - (st.lastWarm || 0) > 10 * 60000) {
+      st.lastWarm = now;
+      const n = await warmup(D, syms);
+      if (n) addLog(D, "INFO", { msg: `Kursverlauf der letzten 2 Stunden für ${n} Coins geladen – der Bot kann sofort bewerten.` });
+      else { D.bars = { t: [], s: Object.fromEntries(syms.map((s) => [s, []])) }; addLog(D, "INFO", { msg: "Kein Kursverlauf verfügbar – der Bot sammelt jetzt 30 Minuten Daten, bevor er handelt." }); }
+    }
+    // Aktuelle Kurse
+    const pr = await fetchPrices(syms); D.prices = pr.data;
+    if (pr.src !== st.source) {
+      if (pr.src) addLog(D, "INFO", { msg: `Kursquelle: ${pr.src}${pr.note ? " (Binance nicht erreichbar)" : ""}.` });
+      else addLog(D, "WARN", { msg: "Keine Kurse erreichbar – neuer Versuch in einer Minute. " + (pr.note || "") });
+    }
+    st.source = pr.src; st.srcErr = pr.note || "";
+    if (!pr.src) { st.lastRun = now; await saveAll(D); return { ok: false, err: pr.note }; }
+    D.bars.ref = Object.fromEntries(Object.entries(pr.data).map(([s, d]) => [s, r7(d.ref)]));
+    // Lernen: Vorhersage von vor H Minuten mit dem heutigen Kurs vergleichen
+    for (const s of syms) {
+      const c = closesOf(D, s), p = pr.data[s]?.price;
+      if (p && c.length >= WARM + H - 1) { const a = analyze(c.slice(0, c.length - H + 1), st); if (a) learnFrom(st, a, p); }
+    }
+    st.W = st.W.map((w) => w * 0.998 + 0.002 / EXPERTS.length); normW(st);
+    // Neue Minutenkerze anhängen
+    const m = Math.floor(now / 60000);
+    D.bars.t.push(m);
+    for (const s of syms) { if (!D.bars.s[s]) D.bars.s[s] = D.bars.t.slice(0, -1).map(() => null); D.bars.s[s].push(r7(pr.data[s]?.price)); }
+    for (const s of Object.keys(D.bars.s)) if (!syms.includes(s)) delete D.bars.s[s];
+    if (D.bars.t.length > MAXBARS) { const cut = D.bars.t.length - MAXBARS; D.bars.t = D.bars.t.slice(cut); for (const s in D.bars.s) D.bars.s[s] = D.bars.s[s].slice(cut); }
+    // Bewerten und handeln
+    D.an = {}; for (const s of syms) D.an[s] = pr.data[s] ? analyze(closesOf(D, s), st) : null;
+    botStep(D);
+    D.eq.push([now, Math.round(equity(D) * 100) / 100]);
+    dailyCheck(D);
+    st.lastRun = now; st.lastScores = Object.fromEntries(Object.entries(D.an).filter(([, a]) => a).map(([s, a]) => [s,
+      { score: +a.score.toFixed(3), trend: a.trend, rsi: +a.rsi.toFixed(1), pAI: +a.pAI.toFixed(3), ex: a.ex.map((e) => +e.toFixed(3)) }]));
+    await saveAll(D);
+    for (const n of D.notes) await notify(n);
+    return { ok: true, src: pr.src, trades: D.notes.length };
+  } finally { running = false; }
+}
+
+/* ================= Zeitplan: jede Minute ================= */
+Deno.cron("ki-trading-bot", "* * * * *", async () => { await tick(); });
+
+/* ================= Web-Schnittstelle für die App ================= */
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
+const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" } });
+
+async function stateJson() {
+  const D = await loadAll(); const st = D.st; const b = D.bars;
+  const prices = {}; for (const s of Object.keys(b.s)) { const c = b.s[s]; let v = null; for (let i = c.length - 1; i >= 0 && v == null; i--) v = c[i]; if (v) prices[s] = { price: v }; }
+  for (const [s, p] of Object.entries(st.positions)) if (!prices[s]) prices[s] = { price: p.last };
+  D.prices = prices;
+  const cfg = { ...st.cfg };
+  return { ok: true, now: Date.now(), lastRun: st.lastRun, source: st.source, srcErr: st.srcErr, paused: st.paused, createdAt: st.createdAt,
+    cfg, cash: st.cash, equity: equity(D), positions: st.positions, trades: D.trades, log: D.log, eq: D.eq,
+    W: st.W, acc: st.acc, learnSteps: st.learnSteps, stats: st.stats, notify: !!env("NTFY_TOPIC"), control: !!env("BOT_KEY"),
+    bars: { t: b.t, s: b.s, ref: b.ref || {} }, scores: st.lastScores || {} };
+}
+
+async function action(body) {
+  const key = env("BOT_KEY");
+  if (!key) return json({ ok: false, err: "BOT_KEY ist im Deno-Dashboard nicht gesetzt – Steuerung deaktiviert." }, 403);
+  if (body.key !== key) return json({ ok: false, err: "Falscher Bot-Schlüssel." }, 403);
+  if (body.action === "tick") return json(await tick(true));
+  if (body.action === "test") {
+    const ok = await notify({ title: "🔔 Test vom KI Trading Bot", msg: "Wenn du das liest, kommen die Nachrichten an!", tags: ["bell"] });
+    return json({ ok, err: ok ? "" : (env("NTFY_TOPIC") ? "ntfy nicht erreichbar" : "NTFY_TOPIC ist nicht gesetzt") });
+  }
+  const D = await loadAll(); D.notes = []; const st = D.st;
+  // aktuelle Kurse für manuelle Verkäufe
+  D.prices = {}; for (const s of Object.keys(D.bars.s)) { const c = D.bars.s[s]; for (let i = c.length - 1; i >= 0; i--) if (c[i] != null) { D.prices[s] = { price: c[i] }; break; } }
+  switch (body.action) {
+    case "pause": st.paused = true; addLog(D, "INFO", { msg: "Bot pausiert – keine neuen Käufe. Offene Positionen werden weiter überwacht." }); break;
+    case "resume": st.paused = false; addLog(D, "INFO", { msg: "Bot läuft wieder." }); break;
+    case "sell": if (st.positions[body.sym]) sell(D, body.sym, "Manuell verkauft"); break;
+    case "closeAll": Object.keys(st.positions).forEach((s) => sell(D, s, "Manuell geschlossen")); break;
+    case "settings": {
+      const n = body.cfg || {}, c = st.cfg, num = (v, a, b2, d) => (isFinite(+v) ? clamp(+v, a, b2) : d);
+      const syms = Array.isArray(n.symbols) ? [...new Set(n.symbols.map((x) => String(x).toUpperCase()).filter((x) => /^[A-Z0-9]{2,12}$/.test(x)))].slice(0, 40) : c.symbols;
+      st.cfg = { ...c, maxPosPct: num(n.maxPosPct, 1, 100, c.maxPosPct), maxPositions: Math.round(num(n.maxPositions, 1, 20, c.maxPositions)),
+        sl: num(n.sl, 0.2, 50, c.sl), tp: num(n.tp, 0.2, 100, c.tp), trail: num(n.trail, 0, 50, c.trail), fee: num(n.fee, 0, 5, c.fee),
+        buyTh: num(n.buyTh, 0.05, 0.95, c.buyTh), sellTh: num(n.sellTh, -0.95, 0, c.sellTh), trendFilter: n.trendFilter ?? c.trendFilter,
+        notifyBuys: n.notifyBuys ?? c.notifyBuys, notifySells: n.notifySells ?? c.notifySells, dailyHour: Math.round(num(n.dailyHour, 0, 23, c.dailyHour)), symbols: syms.length ? syms : c.symbols };
+      addLog(D, "INFO", { msg: "Einstellungen geändert." }); break;
+    }
+    case "reset": {
+      const cash = isFinite(+body.startCash) ? clamp(+body.startCash, 100, 1e9) : st.cfg.startCash;
+      const keep = { W: st.W, acc: st.acc, ai: st.ai, learnSteps: st.learnSteps };
+      D.st = { ...freshState({ ...st.cfg, startCash: cash }), ...keep, lastRun: st.lastRun, source: st.source };
+      D.trades = []; D.eq = []; D.log = []; addLog(D, "INFO", { msg: `Depot zurückgesetzt: ${money(cash)} Spielgeld. Das Gelernte der KI bleibt erhalten.` }); break;
+    }
+    default: return json({ ok: false, err: "Unbekannte Aktion" }, 400);
+  }
+  await saveAll(D); for (const n of D.notes) await notify(n);
+  return json({ ok: true });
+}
+
+Deno.serve(async (req) => {
+  const url = new URL(req.url);
+  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+  try {
+    if (url.pathname === "/api/state") return json(await stateJson());
+    if (url.pathname === "/api/action" && req.method === "POST") return await action(await req.json());
+    if (url.pathname === "/" || url.pathname === "") {
+      const D = await loadAll();
+      const age = D.st.lastRun ? Math.round((Date.now() - D.st.lastRun) / 1000) + " s" : "noch nie";
+      return new Response(`KI Trading Bot – Server läuft ✓\nLetzte Runde vor: ${age}\nKursquelle: ${D.st.source || "–"}\nDepot: ${money(equity({ ...D, prices: {} }))}\n\nTrage diese Adresse in der App unter Einstellungen → Server-Bot ein.`,
+        { headers: { ...CORS, "Content-Type": "text/plain; charset=utf-8" } });
+    }
+    return json({ ok: false, err: "Nicht gefunden" }, 404);
+  } catch (e) { return json({ ok: false, err: String(e && e.message || e) }, 500); }
+});

@@ -20,7 +20,7 @@ body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 Inter,system-
 header{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(11,15,23,.93);backdrop-filter:blur(8px);z-index:5;flex-wrap:wrap}
 .logo{font-weight:700;font-size:16px;display:flex;align-items:center;gap:9px;margin-right:6px}
 .logo .mark{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#7c9cff,#22c55e);display:grid;place-items:center;font-size:12px;color:#0b0f17;font-weight:800}
-.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:12px;color:var(--mut)}
+.pill{white-space:nowrap;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:12px;color:var(--mut)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--mut);flex:none}
 .dot.live{background:var(--up);animation:pulse 1.6s infinite}
 .dot.err{background:var(--down)} .dot.wait{background:var(--warn)}
@@ -107,6 +107,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
 a{color:var(--acc)}
 .hint{font-size:12.5px;color:var(--mut);background:#0d1320;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
 .banner.err button{margin:8px 8px 0 0}
+body.srv .loc{display:none !important}
+body:not(.srv) .srvonly{display:none !important}
+.sess{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center}
+.sess .clock{font-size:30px;font-weight:600;letter-spacing:.02em}
+.prog{height:6px;background:#1f2738;border-radius:3px;overflow:hidden;margin-top:8px}
+.prog i{display:block;height:100%;background:linear-gradient(90deg,#22c55e,#7c9cff);transition:width .9s linear}
+.durs{display:flex;gap:6px;flex-wrap:wrap}
+.durs button{padding:6px 10px;font-size:12.5px}
+.durs button.on{border-color:var(--acc);color:var(--acc)}
+.hist td{font-size:12.5px}
+@media(max-width:760px){.sess{grid-template-columns:1fr auto}.sess .big2{grid-column:1/-1}.sess .clock{font-size:26px}}
 /* Tab-Leiste (nur Handy) */
 .tabs{display:none}
 .mshow{display:none}
@@ -160,6 +171,7 @@ a{color:var(--acc)}
   <span class="pill" id="connPill"><span class="dot" id="connDot"></span><span id="connTxt">Verbinde…</span></span>
   <span class="pill num" id="ageTxt">–</span>
   <div class="spacer"></div>
+  <span class="pill num" id="hdrClock" style="display:none">–</span>
   <span class="pill num mshow" id="hdrPnl">–</span>
   <span class="pill num" id="cdTxt">–</span>
   <button id="runBtn" class="stop">⏸</button>
@@ -169,6 +181,25 @@ a{color:var(--acc)}
 <main>
   <div class="banner" id="banner" data-sec="home">Paper-Trading: Der Bot handelt mit <b>Spielgeld</b> auf Basis echter Live-Kurse. Es werden keine echten Orders an eine Börse geschickt.</div>
   <div class="banner err" id="errBanner" style="display:none"></div>
+
+  <div class="card loc" data-sec="home" id="sessCard">
+    <div class="ch"><h3>Trading-Sitzung</h3><span class="tag hold" id="sessTag">Bereit</span><div class="spacer"></div><span class="mut" style="font-size:12px" id="sessInfo"></span></div>
+    <div class="cb">
+      <div class="sess">
+        <div><div class="mut" style="font-size:12px" id="clockLbl">Dauer</div><div class="clock num" id="sessClock">60:00</div></div>
+        <div class="big2"><div class="mut" style="font-size:12px">Ergebnis dieser Sitzung</div><div class="num" style="font-size:20px;font-weight:600" id="sessPnl">–</div><div class="mut num" style="font-size:12px" id="sessSub"></div></div>
+        <button class="go" id="sessBtn" style="padding:12px 18px;font-size:15px">▶ Sitzung starten</button>
+      </div>
+      <div class="prog"><i id="sessProg" style="width:0%"></i></div>
+      <div class="durs" id="durs" style="margin-top:10px"></div>
+      <div class="mut" style="font-size:12px;margin-top:10px" id="sessHint"></div>
+    </div>
+  </div>
+
+  <div class="card srvonly" data-sec="home">
+    <div class="ch"><h3>Server-Bot</h3><span class="tag hold" id="srvTag">–</span><div class="spacer"></div><button class="small" id="srvRefresh">↻ Aktualisieren</button></div>
+    <div class="cb" id="srvBox"></div>
+  </div>
 
   <section class="kpis" data-sec="home">
     <div class="kpi big"><div class="l">Depotwert</div><div class="v num" id="kEq">–</div><div class="s" id="kEqS">–</div></div>
@@ -181,6 +212,10 @@ a{color:var(--acc)}
 
   <div class="grid2">
     <div class="col">
+      <div class="card loc" data-sec="home">
+        <div class="ch"><h3>Bisherige Sitzungen</h3><div class="spacer"></div><span class="num" style="font-size:12.5px" id="histSum"></span></div>
+        <div class="scroll" style="max-height:260px"><table class="hist" id="histT"><thead><tr><th>Datum</th><th>Dauer</th><th>Trades</th><th>Treffer</th><th>Ergebnis</th></tr></thead><tbody></tbody></table></div>
+      </div>
       <div class="card" data-sec="home">
         <div class="ch"><h3>Depotverlauf</h3><div class="spacer"></div><div class="stats" id="eqStats"></div></div>
         <div class="cb"><canvas id="eqChart"></canvas></div>
@@ -232,15 +267,28 @@ a{color:var(--acc)}
 <div class="mb" id="setM"><div class="modal">
   <div class="mh"><h2>Einstellungen</h2><div class="spacer"></div><button class="small" data-close>✕</button></div>
   <div class="mc">
-    <div class="sect">Datenquelle</div>
-    <label class="f">Markt
+    <div class="sect">Server-Bot (läuft im Hintergrund)</div>
+    <div class="hint">Läuft dein Bot auf dem kostenlosen Deno-Server, trägst du hier dessen Adresse ein. Die App zeigt dann den Stand vom Server, auch das, was er gemacht hat, während dein Handy aus war. Leer lassen = der Bot läuft nur in der App.
+      <div class="fg" style="margin-top:10px">
+        <label class="f">Server-Adresse<input id="fSrvUrl" placeholder="https://….deno.net" autocomplete="off" autocapitalize="off"></label>
+        <label class="f">Bot-Schlüssel (BOT_KEY)<input id="fSrvKey" type="password" placeholder="nur zum Steuern nötig" autocomplete="off" autocapitalize="off"></label>
+      </div>
+      <div class="srvonly" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="small" id="testNotify">🔔 Test-Nachricht senden</button><button class="small" id="forceTick">↻ Runde jetzt ausführen</button></div>
+    </div>
+    <div class="srvonly fg">
+      <label class="chk"><input type="checkbox" id="fNotSell"> Nachricht bei jedem Verkauf (Plus/Minus)</label>
+      <label class="chk"><input type="checkbox" id="fNotBuy"> Nachricht bei jedem Kauf</label>
+      <label class="f">Tagesbilanz um (Uhr)<input id="fDaily" type="number" min="0" max="23" step="1"></label>
+    </div>
+    <div class="sect loc">Datenquelle</div>
+    <label class="f loc">Markt
       <select id="fSource">
         <option value="crypto">Krypto – Binance Live (sofort, ohne Anmeldung, 24/7)</option>
         <option value="stocks">US-Aktien – Finnhub Live (kostenloser API-Key nötig)</option>
         <option value="demo">Demo – simulierte Kurse (offline)</option>
       </select>
     </label>
-    <div id="stockBox" class="hint">
+    <div id="stockBox" class="hint loc">
       Für echte Aktienkurse brauchst du einen <b>kostenlosen</b> API-Key von Finnhub: auf <a href="https://finnhub.io/register" target="_blank" rel="noopener">finnhub.io/register</a> anmelden, Key aus dem Dashboard kopieren und hier einfügen. Live-Ticks gibt es während der US-Handelszeit (15:30–22:00 Uhr deutscher Zeit, Mo–Fr). Bis zu 50 Aktien gleichzeitig.
       <label class="f" style="margin-top:10px">Finnhub API-Key<input id="fKey" placeholder="z. B. cq1abc…" autocomplete="off"></label>
     </div>
@@ -250,7 +298,7 @@ a{color:var(--acc)}
     </label>
     <div class="sect">Bot & Risiko</div>
     <div class="fg">
-      <label class="f">Aktualisierung / Bot-Takt (Sek.)<input id="fInt" type="number" min="2" max="60" step="1"><small>Kerze + Entscheidung alle X Sekunden</small></label>
+      <label class="f loc">Aktualisierung / Bot-Takt (Sek.)<input id="fInt" type="number" min="2" max="60" step="1"><small>Kerze + Entscheidung alle X Sekunden</small></label>
       <label class="f">Startkapital ($)<input id="fCash" type="number" min="100" step="100"><small>Wirkt beim Zurücksetzen</small></label>
       <label class="f">Max. Größe pro Position (%)<input id="fPos" type="number" min="1" max="100" step="1"></label>
       <label class="f">Max. gleichzeitige Positionen<input id="fMaxP" type="number" min="1" max="50" step="1"></label>
@@ -258,11 +306,13 @@ a{color:var(--acc)}
       <label class="f">Gewinnziel / Take-Profit (%)<input id="fTP" type="number" min="0.2" max="100" step="0.1"></label>
       <label class="f">Trailing-Stop (%)<input id="fTr" type="number" min="0" max="50" step="0.1"><small>0 = aus</small></label>
       <label class="f">Gebühr pro Trade (%)<input id="fFee" type="number" min="0" max="5" step="0.01"></label>
+      <label class="f loc">Endspurt: keine Käufe in den letzten … Min.<input id="fNoBuy" type="number" min="0" max="30" step="1"><small>Damit am Ende nichts halbfertig offen ist</small></label>
       <label class="f">Kauf ab KI-Score<input id="fBuy" type="number" min="0.05" max="0.95" step="0.05"><small>höher = vorsichtiger</small></label>
       <label class="f">Verkauf ab KI-Score<input id="fSell" type="number" min="-0.95" max="0" step="0.05"></label>
     </div>
     <label class="chk"><input type="checkbox" id="fTF"> Trendfilter: nie in einen erkannten Abwärtstrend kaufen</label>
-    <label class="chk"><input type="checkbox" id="fWake"> Bildschirm wach halten (Handy) – sonst pausiert der Browser den Bot, wenn das Display ausgeht</label>
+    <label class="chk loc"><input type="checkbox" id="fCloseEnd"> Am Sitzungsende alle Positionen verkaufen (empfohlen – solange die App zu ist, überwacht niemand Stop-Loss)</label>
+    <label class="chk loc"><input type="checkbox" id="fWake"> Bildschirm wach halten (Handy) – sonst pausiert der Browser den Bot, wenn das Display ausgeht</label>
   </div>
   <div class="mf">
     <button class="danger" id="resetBtn">Depot zurücksetzen</button>
@@ -286,7 +336,7 @@ const STORE = 'kiTradingBot_v1';
 const CRYPTO_DEF = 'BTC ETH SOL BNB XRP ADA DOGE AVAX LINK DOT LTC TRX POL SHIB ATOM NEAR UNI ARB OP SUI PEPE APT INJ FIL';
 const STOCK_DEF = 'AAPL MSFT NVDA AMZN GOOGL META TSLA AMD NFLX AVGO PLTR COIN UBER INTC DIS JPM V MA BA PYPL SHOP CRM ORCL ADBE QCOM MU SBUX NKE KO PEP';
 const DEF = {source:'crypto', finnhubKey:'', crypto:CRYPTO_DEF, stocks:STOCK_DEF, demo:'ALPHA BETA GAMMA DELTA OMEGA NOVA ZETA ORION TITAN LUNA',
-  interval:5, startCash:10000, maxPosPct:12, maxPositions:6, sl:2.5, tp:6, trail:1.5, fee:0.1, buyTh:0.3, sellTh:-0.15, trendFilter:true, wake:true};
+  interval:5, startCash:10000, maxPosPct:12, maxPositions:6, sl:2.5, tp:6, trail:1.5, fee:0.1, buyTh:0.3, sellTh:-0.15, trendFilter:true, wake:true, sessMin:60, noBuyMin:5, closeAtEnd:true};
 const EXPERTS = [
   {n:'Trendfolger', d:'EMA 9 / EMA 21 – folgt laufenden Trends'},
   {n:'Momentum', d:'Kursänderung der letzten 10 Takte'},
@@ -303,11 +353,14 @@ let market = {};
 let ui = {sel:null, sort:'score', logF:'all'};
 let conn = {state:'wait', msg:'Verbinde…'};
 let adapter = null, stepTimer = null, nextStepAt = 0;
+const SRV_STORE='kiTradingBot_server';
+let SRV={url:'',key:''}; try{ Object.assign(SRV, JSON.parse(localStorage.getItem(SRV_STORE)||'{}')); }catch(e){}
+SRV.on=!!SRV.url; let srvData=null;
 
 function freshState(cfg){
   return {cfg:{...cfg}, cash:cfg.startCash, positions:{}, trades:[], log:[], equity:[],
     W:EXPERTS.map(()=>1/EXPERTS.length), acc:EXPERTS.map(()=>({h:0,n:0})), ai:[0,0,0,0,0,0,0], learnSteps:0,
-    running:true, createdAt:Date.now()};
+    running:false, session:null, sessions:[], createdAt:Date.now()};
 }
 function load(){
   try{ const raw = localStorage.getItem(STORE); if(!raw) return;
@@ -315,6 +368,7 @@ function load(){
   }catch(e){}
 }
 function save(){
+  if(SRV.on) return;
   try{ localStorage.setItem(STORE, JSON.stringify({...S, trades:S.trades.slice(-1000), log:S.log.slice(-400), equity:S.equity.slice(-4000)})) }catch(e){}
 }
 
@@ -643,6 +697,7 @@ function botStep(){
     if(r) sell(sym,r);
   }
   // 2) Einstiege – beste Signale zuerst
+  if(S.session && S.session.end && Date.now() > S.session.end - c.noBuyMin*60000) return; // Endspurt
   const eq=equity();
   const cands = Object.values(market).filter(m=>m.ready && m.fresh && !S.positions[m.sym] && m.score>=c.buyTh
     && m.barCount>=m.cooldown && !(c.trendFilter && m.trend==='down')).sort((a,b)=>b.score-a.score);
@@ -669,6 +724,7 @@ function step(){
     compute(m);
   }
   learnLive();
+  checkSession(now);
   if(S.running) botStep();
   S.equity.push({t:now, v:equity()});
   if(S.equity.length>4000){ const half=S.equity.slice(0,2000).filter((_,i)=>i%2===0); S.equity=half.concat(S.equity.slice(2000)); }
@@ -773,21 +829,27 @@ function render(){
   $('#connDot').className='dot '+(conn.state==='live'?'live':conn.state==='err'?'err':'wait');
   $('#connTxt').textContent=conn.msg;
   $('#ageTxt').textContent = S.lastData ? 'Letzter Kurs vor '+Math.max(0,Math.round((now-S.lastData)/1000))+' s' : 'Noch keine Kurse';
-  $('#cdTxt').textContent = (S.running?'Nächste Bot-Runde in ':'Bot pausiert · Kerze in ')+Math.max(0,Math.ceil((nextStepAt-now)/1000))+' s';
-  const rb=$('#runBtn'); rb.innerHTML=S.running?'⏸<span class="lb"> Bot pausieren</span>':'▶<span class="lb"> Bot starten</span>'; rb.className=S.running?'stop':'go';
+  $('#cdTxt').textContent = (SRV.on?'Nächste Server-Runde in ':S.running?'Nächste Bot-Runde in ':'Bot wartet · Kerze in ')+Math.max(0,Math.ceil((nextStepAt-now)/1000))+' s';
+  const rb=$('#runBtn');
+  if(SRV.on){ rb.innerHTML=S.running?'⏸<span class="lb"> Bot pausieren</span>':'▶<span class="lb"> Bot fortsetzen</span>'; rb.className=S.running?'stop':'go'; renderSrv(); }
+  else { rb.innerHTML=S.session?'■<span class="lb"> Sitzung beenden</span>':'▶<span class="lb"> Sitzung starten</span>'; rb.className=S.session?'stop':'go';
+  renderSession(); }
   // Kennzahlen
   const eq=equity(), start=c.startCash, pnl=eq-start;
-  const sells=S.trades.filter(t=>t.side==='SELL'); const real=sells.reduce((s,t)=>s+t.pnl,0);
+  const sl=S.trades.filter(t=>t.side==='SELL');
+  let K={n:sl.length, wins:sl.filter(t=>t.pnl>0).length, real:sl.reduce((a,t)=>a+t.pnl,0),
+    sumWin:sl.filter(t=>t.pnl>0).reduce((a,t)=>a+t.pnl,0), sumLoss:sl.filter(t=>t.pnl<=0).reduce((a,t)=>a+t.pnl,0)};
+  if(SRV.on && srvData){ const st=srvData.stats; K={n:st.sells, wins:st.wins, real:st.realized, sumWin:st.sumWin, sumLoss:st.sumLoss}; }
+  const real=K.real, losses=K.n-K.wins;
   let unr=0, inv=0; for(const [s,p] of Object.entries(S.positions)){ const pr=market[s]?.price||p.last||p.avg; unr+=(pr-p.avg)*p.qty; inv+=pr*p.qty; }
-  const wins=sells.filter(t=>t.pnl>0), losses=sells.filter(t=>t.pnl<=0);
   $('#kEq').textContent=money(eq); $('#kEqS').textContent='Start: '+money(start)+' · seit '+new Date(S.createdAt).toLocaleDateString('de-DE');
   $('#hdrPnl').textContent=pct(pnl/start); $('#hdrPnl').className='pill num mshow '+cls(pnl);
   $('#kPnl').textContent=smoney(pnl); $('#kPnl').className='v num '+cls(pnl); $('#kPnlS').textContent=pct(pnl/start); $('#kPnlS').className='s num '+cls(pnl);
-  $('#kReal').textContent=smoney(real); $('#kReal').className='v num '+cls(real); $('#kRealS').textContent=sells.length+' Trades abgeschlossen';
+  $('#kReal').textContent=smoney(real); $('#kReal').className='v num '+cls(real); $('#kRealS').textContent=K.n+' Trades abgeschlossen';
   $('#kUnr').textContent=smoney(unr); $('#kUnr').className='v num '+cls(unr); $('#kUnrS').textContent=Object.keys(S.positions).length+' von '+c.maxPositions+' Positionen offen';
   $('#kCash').textContent=money(S.cash); $('#kCashS').textContent='Investiert: '+money(inv);
-  $('#kWin').textContent=sells.length? nf(wins.length/sells.length*100,0)+' %':'–';
-  $('#kWinS').textContent=sells.length? 'Ø Gewinn '+smoney(wins.length?wins.reduce((s,t)=>s+t.pnl,0)/wins.length:0)+' · Ø Verlust '+smoney(losses.length?losses.reduce((s,t)=>s+t.pnl,0)/losses.length:0):'noch keine abgeschlossenen Trades';
+  $('#kWin').textContent=K.n? nf(K.wins/K.n*100,0)+' %':'–';
+  $('#kWinS').textContent=K.n? 'Ø Gewinn '+smoney(K.wins?K.sumWin/K.wins:0)+' · Ø Verlust '+smoney(losses?K.sumLoss/losses:0):'noch keine abgeschlossenen Trades';
   // Depot-Statistik
   const vals=S.equity.map(e=>e.v); let peak=-Infinity, dd=0; vals.forEach(v=>{ peak=Math.max(peak,v); dd=Math.max(dd,(peak-v)/peak); });
   $('#eqStats').innerHTML=`<span>Hoch <b class="num">${vals.length?money(Math.max(...vals)):'–'}</b></span><span>Tief <b class="num">${vals.length?money(Math.min(...vals)):'–'}</b></span><span>Max. Rückgang <b class="num">${nf(dd*100,2)} %</b></span>`;
@@ -840,20 +902,91 @@ function closeM(el){ el.closest('.mb').classList.remove('open'); }
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeM(b));
 function confirmBox(title, html, ok){ $('#cfT').textContent=title; $('#cfB').innerHTML=html; $('#cfOk').onclick=()=>{ closeM($('#cfOk')); ok(); }; openM('#cfM'); }
 
-$('#runBtn').onclick=()=>{ S.running=!S.running; addLog('INFO',{msg:S.running?'Bot gestartet – handelt jetzt selbstständig.':'Bot pausiert – es werden keine neuen Trades ausgeführt.'}); save(); render(); };
-$('#closeAll').onclick=()=>{ if(!Object.keys(S.positions).length) return; confirmBox('Alle Positionen schließen?','Alle offenen Positionen werden zum aktuellen Kurs verkauft.',()=>{ Object.keys(S.positions).forEach(s=>sell(s,'Manuell geschlossen')); save(); render(); }); };
+/* ================= Sitzungen ================= */
+const DURS=[15,30,60,90,120,0];
+const durTxt = m => m? (m<60? m+' Min.' : (m%60? Math.floor(m/60)+' h '+(m%60)+' Min.' : (m/60)+' Std.')) : 'Unbegrenzt';
+const clock = ms => { const t=Math.max(0,Math.ceil(ms/1000)), h=Math.floor(t/3600), m=Math.floor(t%3600/60), s=t%60; return (h?h+':'+String(m).padStart(2,'0'):String(m).padStart(2,'0'))+':'+String(s).padStart(2,'0'); };
+let loadedAt=Date.now();
+function startSession(){
+  const min=S.cfg.sessMin, now=Date.now();
+  S.session={start:now, end:min? now+min*60000 : 0, startEq:equity(), tIdx:S.trades.length, away:0};
+  S.running=true; keepAwake();
+  addLog('INFO',{msg:'Sitzung gestartet ('+durTxt(min)+'). Der Bot handelt jetzt selbstständig – lass die App offen.'});
+  save(); render();
+}
+function endSession(reason){
+  const se=S.session; if(!se) return;
+  if(S.cfg.closeAtEnd) Object.keys(S.positions).forEach(s=>sell(s,'Sitzungsende – Position geschlossen'));
+  const sells=S.trades.slice(se.tIdx).filter(t=>t.side==='SELL'), eq=equity(), pnl=eq-se.startEq;
+  S.sessions.push({start:se.start, end:Date.now(), startEq:se.startEq, pnl, pnlPct:pnl/se.startEq, trades:sells.length, wins:sells.filter(t=>t.pnl>0).length, away:se.away||0});
+  S.session=null; S.running=false;
+  addLog('INFO',{msg:`Sitzung beendet (${reason}): ${smoney(pnl)} (${pct(pnl/se.startEq)}) · ${sells.length} Trades abgeschlossen.`});
+  save(); render();
+}
+function checkSession(now){
+  const se=S.session; if(!se || !se.end || now<se.end) return;
+  // Nach dem Wiederöffnen erst aktuelle Kurse abwarten (max. 30 s), damit zum echten Preis verkauft wird
+  const held=Object.keys(S.positions), allFresh=held.every(s=>market[s]&&market[s].fresh);
+  if(!allFresh && now-loadedAt<30000) return;
+  endSession(now-se.end>60000 ? 'Zeit lief ab, während die App geschlossen war' : 'Zeit abgelaufen');
+}
+$('#sessBtn').onclick=()=>{ if(S.session) confirmBox('Sitzung jetzt beenden?', S.cfg.closeAtEnd?'Alle offenen Positionen werden zum aktuellen Kurs verkauft.':'Offene Positionen bleiben bestehen.', ()=>endSession('vorzeitig beendet')); else startSession(); };
+$('#runBtn').onclick=()=>{ if(SRV.on){ srvAction(S.running?'pause':'resume'); return; } $('#sessBtn').click(); };
+$('#durs').onclick=e=>{ const d=e.target.dataset.d; if(d==null||S.session) return; S.cfg.sessMin=+d; save(); render(); };
+let hiddenAt=0;
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='hidden'){ hiddenAt=Date.now(); return; }
+  if(S.session && hiddenAt){ const away=Date.now()-hiddenAt; if(away>20000){ S.session.away=(S.session.away||0)+away;
+    addLog('WARN',{msg:'Die App war '+dur(away)+' im Hintergrund – in der Zeit war der Bot pausiert.'}); save(); } }
+  hiddenAt=0;
+});
+function renderSession(){
+  const se=S.session, now=Date.now(), c=S.cfg;
+  $('#durs').innerHTML = se ? '' : '<span class="mut" style="font-size:12px;align-self:center;margin-right:4px">Dauer:</span>'+DURS.map(d=>`<button class="${c.sessMin===d?'on':''}" data-d="${d}">${durTxt(d)}</button>`).join('');
+  const b=$('#sessBtn'), hc=$('#hdrClock');
+  if(se){
+    const left=se.end? se.end-now : 0, pnl=equity()-se.startEq, sells=S.trades.slice(se.tIdx).filter(t=>t.side==='SELL');
+    const endspurt = se.end && left <= c.noBuyMin*60000;
+    $('#sessTag').className='tag '+(endspurt?'warn':'buy'); $('#sessTag').textContent= endspurt?'Endspurt':'Läuft';
+    $('#clockLbl').textContent= se.end?'Restzeit':'Läuft seit'; $('#sessClock').textContent= se.end? clock(left) : clock(now-se.start);
+    $('#sessPnl').textContent=smoney(pnl)+'  '+pct(pnl/se.startEq); $('#sessPnl').className='num '+cls(pnl);
+    $('#sessSub').textContent=sells.length+' Trades abgeschlossen · '+Object.keys(S.positions).length+' offen';
+    $('#sessProg').style.width = se.end? clamp((now-se.start)/(se.end-se.start)*100,0,100)+'%' : '100%';
+    $('#sessInfo').textContent='seit '+tm(se.start);
+    $('#sessHint').innerHTML = endspurt ? `Endspurt: In den letzten ${c.noBuyMin} Min. kauft der Bot nichts Neues mehr${c.closeAtEnd?', am Ende wird alles verkauft':''}.` : 'Lass die App offen und den Bildschirm an – sobald du sie verlässt, pausiert der Bot.';
+    b.className='stop'; b.textContent='■ Beenden';
+    hc.style.display=''; hc.textContent='⏱ '+(se.end?clock(left):clock(now-se.start)); hc.className='pill num '+cls(pnl);
+  } else {
+    $('#sessTag').className='tag hold'; $('#sessTag').textContent='Bereit';
+    $('#clockLbl').textContent='Dauer'; $('#sessClock').textContent= c.sessMin? clock(c.sessMin*60000) : '∞';
+    const last=S.sessions[S.sessions.length-1];
+    $('#sessPnl').textContent= last? smoney(last.pnl)+'  '+pct(last.pnlPct) : '–'; $('#sessPnl').className='num '+(last?cls(last.pnl):'mut');
+    $('#sessSub').textContent= last? 'letzte Sitzung · '+last.trades+' Trades' : 'noch keine Sitzung';
+    $('#sessProg').style.width='0%'; $('#sessInfo').textContent='';
+    const ready=Object.values(market).filter(m=>m.ready).length;
+    $('#sessHint').textContent = ready ? `Bereit: ${ready} Werte sind bewertet. Starte die Sitzung, der Bot handelt dann selbstständig.` : 'Der Bot sammelt noch Kursdaten – du kannst trotzdem schon starten, er kauft, sobald er genug weiß.';
+    b.className='go'; b.textContent='▶ Sitzung starten';
+    hc.style.display='none';
+  }
+  const H=S.sessions.slice().reverse();
+  const tot=S.sessions.reduce((a,x)=>a+x.pnl,0);
+  $('#histSum').innerHTML = S.sessions.length? `<span class="mut">${S.sessions.length} Sitzungen · gesamt</span> <b class="${cls(tot)}">${smoney(tot)}</b>` : '';
+  $('#histT tbody').innerHTML = H.length ? H.slice(0,50).map(x=>`<tr><td>${new Date(x.start).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})} ${new Date(x.start).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}</td><td>${dur(x.end-x.start)}</td><td class="num">${x.trades}</td><td class="num">${x.trades?nf(x.wins/x.trades*100,0)+' %':'–'}</td><td class="num ${cls(x.pnl)}">${smoney(x.pnl)}<div style="font-size:11px">${pct(x.pnlPct)}</div></td></tr>`).join('')
+    : '<tr><td colspan="5" class="empty">Hier erscheint nach jeder Sitzung dein Ergebnis.</td></tr>';
+}
+$('#closeAll').onclick=()=>{ if(!Object.keys(S.positions).length) return; confirmBox('Alle Positionen schließen?','Alle offenen Positionen werden zum aktuellen Kurs verkauft.',()=>{ if(SRV.on){ srvAction('closeAll'); return; } Object.keys(S.positions).forEach(s=>sell(s,'Manuell geschlossen')); save(); render(); }); };
 function onTap(el, fn){
   let st=null;
   el.addEventListener('pointerdown', e=>{ st={x:e.clientX, y:e.clientY, t:e.target}; });
   el.addEventListener('pointerup', e=>{ if(!st) return; const d=Math.hypot(e.clientX-st.x, e.clientY-st.y), t=st.t; st=null; if(d<12) fn(t); });
   el.addEventListener('pointercancel', ()=>{ st=null; });
 }
-onTap($('#posT'), t=>{ const b=t.closest('[data-sell]'); if(b){ const s=b.dataset.sell; confirmBox(s+' verkaufen?','Die Position wird zum aktuellen Kurs verkauft.',()=>{ sell(s,'Manuell verkauft'); save(); render(); }); } });
+onTap($('#posT'), t=>{ const b=t.closest('[data-sell]'); if(b){ const s=b.dataset.sell; confirmBox(s+' verkaufen?','Die Position wird zum aktuellen Kurs verkauft.',()=>{ if(SRV.on){ srvAction('sell',{sym:s}); return; } sell(s,'Manuell verkauft'); save(); render(); }); } });
 onTap($('#wl'), t=>{ const tr=t.closest('tr[data-sym]'); if(tr){ ui.sel=tr.dataset.sym; render(); if(isM()) $('#detailCard').scrollIntoView({behavior:'smooth',block:'start'}); } });
 document.body.dataset.tab='home';
 $('#tabs').onclick=e=>{ const b=e.target.closest('[data-tab]'); if(!b) return; document.body.dataset.tab=b.dataset.tab;
   document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('on',x===b)); window.scrollTo(0,0); render(); };
-$('#errBanner').onclick=e=>{ const a=e.target.dataset.act; if(a==='retry'){ showErr(''); startData(); render(); } if(a==='demo') switchToDemo(); };
+$('#errBanner').onclick=e=>{ const a=e.target.dataset.act; if(a==='srvretry') srvPoll(); if(a==='retry'){ showErr(''); startData(); render(); } if(a==='demo') switchToDemo(); };
 function switchToDemo(){
   const keepAI={W:S.W,acc:S.acc,ai:S.ai,learnSteps:S.learnSteps};
   const cfg={...S.cfg, source:'demo'};
@@ -878,7 +1011,9 @@ function fillForm(){
   const c=S.cfg; formSyms={crypto:c.crypto, stocks:c.stocks, demo:c.demo};
   $('#fSource').value=c.source; $('#fKey').value=c.finnhubKey; $('#fInt').value=c.interval; $('#fCash').value=c.startCash;
   $('#fPos').value=c.maxPosPct; $('#fMaxP').value=c.maxPositions; $('#fSL').value=c.sl; $('#fTP').value=c.tp; $('#fTr').value=c.trail;
-  $('#fFee').value=c.fee; $('#fBuy').value=c.buyTh; $('#fSell').value=c.sellTh; $('#fTF').checked=c.trendFilter; $('#fWake').checked=c.wake;
+  $('#fFee').value=c.fee; $('#fBuy').value=c.buyTh; $('#fSell').value=c.sellTh; $('#fTF').checked=c.trendFilter; $('#fWake').checked=c.wake; $('#fNoBuy').value=c.noBuyMin; $('#fCloseEnd').checked=c.closeAtEnd;
+  $('#fSrvUrl').value=SRV.url; $('#fSrvKey').value=SRV.key; $('#fNotSell').checked=c.notifySells!==false; $('#fNotBuy').checked=!!c.notifyBuys; $('#fDaily').value=c.dailyHour??21;
+  if(SRV.on) c.source='crypto', $('#fSource').value='crypto';
   srcChanged();
 }
 function srcChanged(){
@@ -891,10 +1026,25 @@ $('#setBtn').onclick=()=>{ fillForm(); openM('#setM'); };
 
 $('#saveBtn').onclick=()=>{
   formSyms[$('#fSyms').dataset.src]=$('#fSyms').value;
+  const url=$('#fSrvUrl').value.trim().replace(/\/+$/,''), key=$('#fSrvKey').value.trim();
+  if(url && !/^https?:\/\//.test(url)){ confirmBox('Adresse prüfen','Die Server-Adresse muss mit https:// beginnen.',()=>{}); return; }
+  if(url!==SRV.url || key!==SRV.key){
+    try{ localStorage.setItem(SRV_STORE, JSON.stringify({url,key})); }catch(e){}
+    if(url!==SRV.url){ location.reload(); return; }
+    SRV.key=key;
+  }
+  if(SRV.on){
+    const num=(id,a,b,d)=>{ const v=parseFloat($(id).value); return isFinite(v)?clamp(v,a,b):d; };
+    const cfg={ maxPosPct:num('#fPos',1,100,15), maxPositions:Math.round(num('#fMaxP',1,20,5)), sl:num('#fSL',0.2,50,2.5), tp:num('#fTP',0.2,100,5), trail:num('#fTr',0,50,1.5),
+      fee:num('#fFee',0,5,0.1), buyTh:num('#fBuy',0.05,0.95,0.3), sellTh:num('#fSell',-0.95,0,-0.15), trendFilter:$('#fTF').checked,
+      notifySells:$('#fNotSell').checked, notifyBuys:$('#fNotBuy').checked, dailyHour:Math.round(num('#fDaily',0,23,21)),
+      symbols:formSyms.crypto.toUpperCase().split(/[\s,;]+/).filter(Boolean) };
+    closeM($('#saveBtn')); srvAction('settings',{cfg}); return;
+  }
   const o=S.cfg, num=(id,a,b,d)=>{ const v=parseFloat($(id).value); return isFinite(v)?clamp(v,a,b):d; };
   const n={...o, source:$('#fSource').value, finnhubKey:$('#fKey').value.trim(), crypto:formSyms.crypto, stocks:formSyms.stocks, demo:formSyms.demo,
     interval:Math.round(num('#fInt',2,60,5)), startCash:num('#fCash',100,1e9,10000), maxPosPct:num('#fPos',1,100,12), maxPositions:Math.round(num('#fMaxP',1,50,6)),
-    sl:num('#fSL',0.2,50,2.5), tp:num('#fTP',0.2,100,6), trail:num('#fTr',0,50,1.5), fee:num('#fFee',0,5,0.1), buyTh:num('#fBuy',0.05,0.95,0.3), sellTh:num('#fSell',-0.95,0,-0.15), trendFilter:$('#fTF').checked, wake:$('#fWake').checked};
+    sl:num('#fSL',0.2,50,2.5), tp:num('#fTP',0.2,100,6), trail:num('#fTr',0,50,1.5), fee:num('#fFee',0,5,0.1), buyTh:num('#fBuy',0.05,0.95,0.3), sellTh:num('#fSell',-0.95,0,-0.15), trendFilter:$('#fTF').checked, wake:$('#fWake').checked, noBuyMin:Math.round(num('#fNoBuy',0,30,5)), closeAtEnd:$('#fCloseEnd').checked};
   const apply=(reset)=>{
     const dataChanged = n.source!==o.source || n[n.source]!==o[o.source] || n.finnhubKey!==o.finnhubKey || n.interval!==o.interval;
     if(reset){ const keepAI={W:S.W,acc:S.acc,ai:S.ai,learnSteps:S.learnSteps}; S=Object.assign(freshState(n),keepAI); addLog('INFO',{msg:'Neues Depot mit '+money(n.startCash)+' Spielgeld gestartet.'}); }
@@ -908,18 +1058,88 @@ $('#saveBtn').onclick=()=>{
   } else apply(n.source!==o.source);
 };
 $('#resetBtn').onclick=()=>confirmBox('Depot zurücksetzen?','Alle Positionen, Trades und der Depotverlauf werden gelöscht. Du startest wieder mit '+money(parseFloat($('#fCash').value)||S.cfg.startCash)+'. Das Gelernte der KI bleibt erhalten.',()=>{
+  if(SRV.on){ closeM($('#saveBtn')); srvAction('reset',{startCash:parseFloat($('#fCash').value)||S.cfg.startCash}); return; }
   S.cfg.startCash=parseFloat($('#fCash').value)||S.cfg.startCash;
   const keepAI={W:S.W,acc:S.acc,ai:S.ai,learnSteps:S.learnSteps}; S=Object.assign(freshState(S.cfg),keepAI);
   addLog('INFO',{msg:'Depot zurückgesetzt: '+money(S.cfg.startCash)+' Spielgeld.'}); closeM($('#saveBtn')); save(); render();
 });
 window.addEventListener('resize',()=>{ drawEquity(); drawDetail(); });
 
+/* ================= Server-Modus ================= */
+async function srvPoll(){
+  try{
+    const r=await fetchT(SRV.url+'/api/state',10000); const d=await r.json();
+    if(!d.ok) throw new Error(d.err||('HTTP '+r.status));
+    applySrv(d); showErr('');
+  }catch(e){
+    setConn('err','Server nicht erreichbar');
+    showErr('<b>Der Server-Bot ist gerade nicht erreichbar.</b><br>Prüfe die Adresse in den Einstellungen (sie endet meist auf .deno.net) und ob deine App bei Deno läuft. ('+esc(e.message||e)+')<br><button class="small" data-act="srvretry">↻ Erneut versuchen</button>');
+  }
+  render();
+}
+function applySrv(d){
+  srvData=d;
+  S.cfg={...S.cfg, ...d.cfg, interval:60, source:'crypto', crypto:d.cfg.symbols.join(' '), startCash:d.cfg.startCash};
+  Object.assign(S,{cash:d.cash, positions:d.positions, trades:d.trades, log:d.log, equity:d.eq.map(([t,v])=>({t,v})), W:d.W, acc:d.acc,
+    learnSteps:d.learnSteps, createdAt:d.createdAt, running:!d.paused, session:null, lastData:d.lastRun});
+  const T=d.bars.t.map(m=>m*60000); market={};
+  for(const [sym,arr] of Object.entries(d.bars.s)){
+    const m=newMarket(sym); arr.forEach((v,i)=>{ if(v!=null) m.bars.push({t:T[i],o:v,h:v,l:v,c:v}); });
+    m.price=m.bars.length? m.bars[m.bars.length-1].c : null; m.ref=d.bars.ref[sym]||m.price; m.lastTs=d.lastRun; m.fresh=true; m.barCount=m.bars.length;
+    const x=d.scores[sym]; if(x){ Object.assign(m,{ready:true, score:x.score, trend:x.trend, rsi:x.rsi, a:{ex:x.ex, pAI:x.pAI, p:m.price}}); }
+    market[sym]=m;
+  }
+  for(const [s,p] of Object.entries(d.positions)) if(!market[s]){ const m=newMarket(s); m.price=p.last; market[s]=m; }
+  if(!ui.sel || !market[ui.sel]) ui.sel=Object.keys(market)[0];
+  nextStepAt=(d.lastRun||Date.now())+60000;
+  setConn(d.source && Date.now()-d.lastRun<180000 ? 'live':'err', d.source ? 'Server · '+d.source : 'Server · keine Kurse');
+}
+async function srvAction(action, extra={}){
+  if(!SRV.key){ confirmBox('Bot-Schlüssel fehlt','Zum Steuern des Server-Bots trage in den Einstellungen deinen Bot-Schlüssel (BOT_KEY) ein.',()=>{ fillForm(); openM('#setM'); }); return false; }
+  try{
+    const r=await fetch(SRV.url+'/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:SRV.key,action,...extra})});
+    const d=await r.json();
+    if(!d.ok){ confirmBox('Hat nicht geklappt', esc(d.err||'Unbekannter Fehler'), ()=>{}); return false; }
+    await srvPoll(); return d;
+  }catch(e){ confirmBox('Server nicht erreichbar', esc(String(e.message||e)), ()=>{}); return false; }
+}
+function renderSrv(){
+  const d=srvData, box=$('#srvBox'), tag=$('#srvTag'); if(!box) return;
+  if(!d){ tag.className='tag warn'; tag.textContent='Verbinde…'; box.innerHTML='<span class="mut">Lade Stand vom Server …</span>'; return; }
+  const age=d.lastRun? Date.now()-d.lastRun : Infinity, ok=age<180000 && d.source;
+  tag.className='tag '+(!ok?'sell':d.paused?'warn':'buy'); tag.textContent=!ok?'Gestört':d.paused?'Pausiert':'Läuft';
+  box.innerHTML=`<div class="stats" style="gap:8px 18px">
+      <span>Letzte Runde <b class="num">${d.lastRun? 'vor '+dur(age) : 'noch keine'}</b></span>
+      <span>Kursquelle <b>${esc(d.source||'–')}</b></span>
+      <span>Takt <b>jede Minute</b></span>
+      <span>Handy-Nachrichten <b class="${d.notify?'up':'down'}">${d.notify?'an':'aus'}</b></span>
+      <span>Steuerung <b class="${SRV.key?'up':'mut'}">${SRV.key?'freigeschaltet':'nur ansehen'}</b></span></div>
+    <div class="mut" style="font-size:12px;margin-top:8px">${ok? (d.paused?'Der Bot kauft gerade nichts Neues, überwacht aber offene Positionen weiter.':'Der Bot läuft rund um die Uhr auf deinem Deno-Server – auch wenn dein Handy aus ist.')
+      : 'Der Server hat seit mehr als 3 Minuten keine Runde gemacht'+(d.srcErr?' ('+esc(d.srcErr)+')':'')+'. Prüfe im Deno-Dashboard unter „Cron“, ob der Zeitplan läuft.'}</div>`;
+}
+$('#srvRefresh').onclick=()=>srvPoll();
+$('#testNotify').onclick=async()=>{ const r=await srvAction('test'); if(r) confirmBox('Test gesendet','Schau auf dein Handy – in der ntfy-App sollte jetzt eine Nachricht erscheinen.',()=>{}); };
+$('#forceTick').onclick=async()=>{ const r=await srvAction('tick'); if(r) confirmBox('Runde ausgeführt', r.ok? 'Der Bot hat gerade eine Runde gemacht (Quelle: '+esc(r.src||'–')+').' : 'Keine Kurse erreichbar: '+esc(r.err||''), ()=>{}); };
+
 /* ================= Start ================= */
+if(SRV.on){
+  document.body.classList.add('srv');
+  S=freshState(DEF);
+  $('#banner').innerHTML='Server-Bot: Läuft rund um die Uhr im Hintergrund – mit <b>Spielgeld</b> auf Basis echter Kurse. Es werden keine echten Orders an eine Börse geschickt.';
+  setConn('wait','Verbinde mit Server…');
+  srvPoll(); setInterval(srvPoll, 15000);
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') srvPoll(); });
+  setInterval(render, 1000);
+} else {
 load();
-if(!S.log.length) addLog('INFO',{msg:'Willkommen! Der Bot startet mit '+money(S.cfg.startCash)+' Spielgeld und handelt selbstständig, sobald er genug Kursdaten hat.'});
+if(!S.sessions) S.sessions=[];
+if(S.running && !S.session){ S.running=false; addLog('INFO',{msg:'Neu: Sitzungs-Modus! Wähle eine Dauer und tippe auf „Sitzung starten“.'}); }
+if(S.session && S.session.end && Date.now()>S.session.end) addLog('WARN',{msg:'Die Sitzung ist abgelaufen, während die App geschlossen war – der Bot schließt sie gleich mit aktuellen Kursen ab.'});
+if(!S.log.length) addLog('INFO',{msg:'Willkommen! Du hast '+money(S.cfg.startCash)+' Spielgeld. Wähle eine Dauer und starte eine Sitzung – der Bot handelt dann selbstständig.'});
 addLog('INFO',{msg:'Verbinde mit '+(S.cfg.source==='crypto'?'Binance (Krypto live)':S.cfg.source==='stocks'?'Finnhub (US-Aktien live)':'Demo-Simulation')+' – '+symList().length+' Werte, Takt alle '+S.cfg.interval+' s.'});
 startData(); startTimer(); render();
 setInterval(render, 1000);
+}
 </script>
 </body>
 </html>

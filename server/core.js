@@ -39,7 +39,8 @@ function fq(q) { if (q >= 1000) return nf(q, 0); if (q >= 1) return Number.isInt
 function dur(ms) { const m = Math.round(ms / 60000); if (m < 60) return m + " Min."; const h = Math.floor(m / 60); return h + " Std. " + (m % 60) + " Min."; }
 async function fetchT(url, ms = 8000, opt = {}) {
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
-  try { return await fetch(url, { ...opt, signal: ac.signal }); } finally { clearTimeout(t); }
+  const headers = { "User-Agent": "Mozilla/5.0 (compatible; KI-Trading-Bot/1.0; +https://h-shyp.github.io/ki-trading-bot/)", "Accept": "application/json", ...(opt.headers || {}) };
+  try { return await fetch(url, { ...opt, headers, signal: ac.signal }); } finally { clearTimeout(t); }
 }
 function berlin(ts) {
   const p = Object.fromEntries(new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
@@ -86,6 +87,15 @@ async function fetchPrices(syms) {
     } catch (e) { errs.push(h + " " + (e.name || "Fehler")); }
   }
   try {
+    const r = await fetchT(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${syms.join(",")}&tsyms=USD`);
+    if (r.ok) {
+      const j = await r.json(); const raw = j.RAW || {}; const data = {};
+      for (const s of syms) { const d = raw[s] && raw[s].USD; if (d && d.PRICE) data[s] = { price: +d.PRICE, ref: +(d.OPEN24HOUR || d.PRICE) }; }
+      if (Object.keys(data).length) return { src: "CryptoCompare", data, note: errs.join(", ") };
+      errs.push("CryptoCompare " + (j.Message || "leer"));
+    } else errs.push("CryptoCompare " + r.status);
+  } catch (e) { errs.push("CryptoCompare " + (e.name || "Fehler")); }
+  try {
     const ids = [...new Set(syms.map((s) => CG[s]).filter(Boolean))];
     const r = await fetchT(`https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd&include_24hr_change=true`);
     if (r.ok) {
@@ -96,22 +106,31 @@ async function fetchPrices(syms) {
   } catch (e) { errs.push("CoinGecko " + (e.name || "Fehler")); }
   return { src: "", data: {}, note: errs.join(", ") };
 }
-// Startverlauf: letzte 2 Stunden Minutenkerzen von Binance, damit der Bot sofort bewerten kann
+// Startverlauf: letzte 2 Stunden Minutenkerzen, damit der Bot sofort bewerten kann
+async function klinesBinance(h, s) {
+  const r = await fetchT(`${h}/api/v3/klines?symbol=${s}USDT&interval=1m&limit=${MAXBARS + 1}`);
+  if (!r.ok) return null;
+  return (await r.json()).slice(0, -1).map((k) => [Math.floor(k[0] / 60000) + 1, +k[4]]); // laufende Minute weglassen
+}
+async function klinesCC(s) {
+  const r = await fetchT(`https://min-api.cryptocompare.com/data/v2/histominute?fsym=${s}&tsym=USD&limit=${MAXBARS}`);
+  if (!r.ok) return null;
+  const j = await r.json(); const rows = j && j.Data && j.Data.Data; if (!rows || !rows.length) return null;
+  return rows.filter((k) => k.close > 0).map((k) => [Math.floor(k.time / 60) + 1, +k.close]);
+}
 async function warmup(D, syms) {
-  const series = {}; let base = null; let hosts = BINANCE;
+  // Quelle mit dem ersten Coin bestimmen (spart Abrufe – Cloudflare erlaubt nur 50 pro Runde)
+  let load = null;
+  for (const h of BINANCE) { try { if ((await klinesBinance(h, syms[0]))?.length) { load = (s) => klinesBinance(h, s); break; } } catch (_) { /* weiter */ } }
+  if (!load) { try { if ((await klinesCC(syms[0]))?.length) load = klinesCC; } catch (_) { /* weiter */ } }
+  if (!load) return 0;
+  const series = {}; let base = null;
   for (const s of syms) {
-    for (const h of hosts) {
-      try {
-        const r = await fetchT(`${h}/api/v3/klines?symbol=${s}USDT&interval=1m&limit=${MAXBARS + 1}`);
-        if (!r.ok) continue;
-        hosts = [h];
-        const rows = (await r.json()).slice(0, -1); // letzte (laufende) Minute weglassen
-        series[s] = new Map(rows.map((k) => [Math.floor(k[0] / 60000) + 1, +k[4]]));
-        if (!base || rows.length > base.length) base = rows.map((k) => Math.floor(k[0] / 60000) + 1);
-        break;
-      } catch (_) { /* nächster Server */ }
-    }
-    if (!base && hosts === BINANCE && s === syms[1]) break; // Binance nicht erreichbar → nicht weiter versuchen
+    try {
+      const rows = await load(s); if (!rows || !rows.length) continue;
+      series[s] = new Map(rows);
+      if (!base || rows.length > base.length) base = rows.map((x) => x[0]);
+    } catch (_) { /* Coin überspringen */ }
   }
   if (!base) return 0;
   D.bars.t = base;

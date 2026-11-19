@@ -1115,7 +1115,8 @@ function renderSrv(){
       <span>Handy-Nachrichten <b class="${d.notify?'up':'down'}">${d.notify?'an':'aus'}</b></span>
       <span>Steuerung <b class="${SRV.key?'up':'mut'}">${SRV.key?'freigeschaltet':'nur ansehen'}</b></span></div>
     <div class="mut" style="font-size:12px;margin-top:8px">${ok? (d.paused?'Der Bot kauft gerade nichts Neues, überwacht aber offene Positionen weiter.':'Der Bot läuft rund um die Uhr auf deinem Cloudflare-Server – auch wenn dein Handy aus ist.')
-      : 'Der Server hat seit mehr als 3 Minuten keine Runde gemacht'+(d.srcErr?' ('+esc(d.srcErr)+')':'')+'. Prüfe bei Cloudflare unter Workers → ki-trading-bot → Einstellungen → Trigger, ob der Zeitplan „* * * * *“ eingetragen ist.'}</div>`;
+      : age<180000 ? 'Der Bot läuft, bekommt aber gerade keine Kurse'+(d.srcErr?' ('+esc(d.srcErr)+')':'')+'. Er versucht es jede Minute neu.'
+      : 'Der Server hat seit mehr als 3 Minuten keine Runde gemacht. Prüfe bei Cloudflare unter Workers → ki-trading-bot → Settings → Trigger, ob der Zeitplan „* * * * *“ eingetragen ist.'}</div>`;
 }
 $('#srvRefresh').onclick=()=>srvPoll();
 $('#testNotify').onclick=async()=>{ const r=await srvAction('test'); if(r) confirmBox('Test gesendet','Schau auf dein Handy – in der ntfy-App sollte jetzt eine Nachricht erscheinen.',()=>{}); };

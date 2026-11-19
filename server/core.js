@@ -18,7 +18,7 @@ const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
   APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
-const DEF_CFG = { startCash: 10000, maxPosPct: 15, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+const DEF_CFG = { startCash: 500, maxPosPct: 15, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
   buyTh: 0.35, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
 const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
@@ -60,6 +60,12 @@ async function loadAll() {
   const s = v.st ? { ...freshState(), ...v.st } : freshState();
   s.cfg = { ...DEF_CFG, ...(s.cfg || {}) };
   if (!s.cfgV || s.cfgV < 2) { s.cfg.buyTh = Math.max(s.cfg.buyTh, DEF_CFG.buyTh); s.cfg.sellTh = Math.min(s.cfg.sellTh, DEF_CFG.sellTh); s.cfgV = 2; normW(s); }
+  if (s.cfgV < 3) { // Neustart mit 500 $ Spielgeld (Wunsch vom 19.11.); das Gelernte der KI bleibt
+    const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm };
+    const n = { ...freshState({ ...s.cfg, startCash: 500 }), ...keep, cfgV: 3 };
+    return { st: n, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
+      log: [{ t: Date.now(), type: "INFO", msg: "Neues Depot mit 500,00 $ Spielgeld gestartet. Das Gelernte der KI bleibt erhalten." }] };
+  }
   return { st: s, bars: v.bars || { t: [], s: {}, ref: {} }, trades: v.trades || [], log: v.log || [], eq: v.eq || [] };
 }
 async function saveAll(D) {

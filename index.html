@@ -268,9 +268,9 @@ body:not(.srv) .srvonly{display:none !important}
   <div class="mh"><h2>Einstellungen</h2><div class="spacer"></div><button class="small" data-close>✕</button></div>
   <div class="mc">
     <div class="sect">Server-Bot (läuft im Hintergrund)</div>
-    <div class="hint">Läuft dein Bot auf dem kostenlosen Deno-Server, trägst du hier dessen Adresse ein. Die App zeigt dann den Stand vom Server, auch das, was er gemacht hat, während dein Handy aus war. Leer lassen = der Bot läuft nur in der App.
+    <div class="hint">Läuft dein Bot auf dem kostenlosen Cloudflare-Server, trägst du hier dessen Adresse ein. Die App zeigt dann den Stand vom Server, auch das, was er gemacht hat, während dein Handy aus war. Leer lassen = der Bot läuft nur in der App.
       <div class="fg" style="margin-top:10px">
-        <label class="f">Server-Adresse<input id="fSrvUrl" placeholder="https://….deno.net" autocomplete="off" autocapitalize="off"></label>
+        <label class="f">Server-Adresse<input id="fSrvUrl" placeholder="https://ki-trading-bot.….workers.dev" autocomplete="off" autocapitalize="off"></label>
         <label class="f">Bot-Schlüssel (BOT_KEY)<input id="fSrvKey" type="password" placeholder="nur zum Steuern nötig" autocomplete="off" autocapitalize="off"></label>
       </div>
       <div class="srvonly" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="small" id="testNotify">🔔 Test-Nachricht senden</button><button class="small" id="forceTick">↻ Runde jetzt ausführen</button></div>
@@ -1073,7 +1073,7 @@ async function srvPoll(){
     applySrv(d); showErr('');
   }catch(e){
     setConn('err','Server nicht erreichbar');
-    showErr('<b>Der Server-Bot ist gerade nicht erreichbar.</b><br>Prüfe die Adresse in den Einstellungen (sie endet meist auf .deno.net) und ob deine App bei Deno läuft. ('+esc(e.message||e)+')<br><button class="small" data-act="srvretry">↻ Erneut versuchen</button>');
+    showErr('<b>Der Server-Bot ist gerade nicht erreichbar.</b><br>Prüfe die Adresse in den Einstellungen (sie endet auf .workers.dev) und ob dein Worker bei Cloudflare läuft. ('+esc(e.message||e)+')<br><button class="small" data-act="srvretry">↻ Erneut versuchen</button>');
   }
   render();
 }
@@ -1114,8 +1114,8 @@ function renderSrv(){
       <span>Takt <b>jede Minute</b></span>
       <span>Handy-Nachrichten <b class="${d.notify?'up':'down'}">${d.notify?'an':'aus'}</b></span>
       <span>Steuerung <b class="${SRV.key?'up':'mut'}">${SRV.key?'freigeschaltet':'nur ansehen'}</b></span></div>
-    <div class="mut" style="font-size:12px;margin-top:8px">${ok? (d.paused?'Der Bot kauft gerade nichts Neues, überwacht aber offene Positionen weiter.':'Der Bot läuft rund um die Uhr auf deinem Deno-Server – auch wenn dein Handy aus ist.')
-      : 'Der Server hat seit mehr als 3 Minuten keine Runde gemacht'+(d.srcErr?' ('+esc(d.srcErr)+')':'')+'. Prüfe im Deno-Dashboard unter „Cron“, ob der Zeitplan läuft.'}</div>`;
+    <div class="mut" style="font-size:12px;margin-top:8px">${ok? (d.paused?'Der Bot kauft gerade nichts Neues, überwacht aber offene Positionen weiter.':'Der Bot läuft rund um die Uhr auf deinem Cloudflare-Server – auch wenn dein Handy aus ist.')
+      : 'Der Server hat seit mehr als 3 Minuten keine Runde gemacht'+(d.srcErr?' ('+esc(d.srcErr)+')':'')+'. Prüfe bei Cloudflare unter Workers → ki-trading-bot → Einstellungen → Trigger, ob der Zeitplan „* * * * *“ eingetragen ist.'}</div>`;
 }
 $('#srvRefresh').onclick=()=>srvPoll();
 $('#testNotify').onclick=async()=>{ const r=await srvAction('test'); if(r) confirmBox('Test gesendet','Schau auf dein Handy – in der ntfy-App sollte jetzt eine Nachricht erscheinen.',()=>{}); };

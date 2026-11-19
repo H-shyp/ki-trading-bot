@@ -1,0 +1,10 @@
+{
+  // Cloudflare Worker für den KI Trading Bot (Server-Teil)
+  "name": "ki-trading-bot",
+  "main": "server/worker.js",
+  "compatibility_date": "2025-09-01",
+  "triggers": { "crons": ["* * * * *"] },
+  "durable_objects": { "bindings": [{ "name": "BOT", "class_name": "Bot" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Bot"] }],
+  "observability": { "enabled": true }
+}

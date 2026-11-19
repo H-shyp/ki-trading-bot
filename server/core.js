@@ -1,12 +1,13 @@
-// KI Trading Bot – Server für Deno Deploy (läuft im Hintergrund, jede Minute)
+// KI Trading Bot – Bot-Logik (plattformunabhängig)
 // Paper-Trading mit Spielgeld auf Basis echter Krypto-Kurse.
 //
-// Umgebungsvariablen (im Deno-Dashboard eintragen):
-//   NTFY_TOPIC  – Kanalname für Handy-Nachrichten über die App „ntfy“ (geheim halten)
-//   BOT_KEY     – Schlüssel, mit dem die Web-App den Bot steuern darf (geheim halten)
-
-const env = (k) => (Deno.env.get(k) || "").trim();
-const kv = await Deno.openKv();
+// Geheime Variablen (im Cloudflare-Dashboard eintragen):
+//   NTFY_TOPIC  – Kanalname für Handy-Nachrichten über die App „ntfy“
+//   BOT_KEY     – Schlüssel, mit dem die Web-App den Bot steuern darf
+//
+// io = { env(name), getMany([...keys]) -> {key: value}, putMany({key: value}) }
+export function makeBot(io) {
+const env = (k) => String(io.env(k) || "").trim();
 
 /* ================= Einstellungen ================= */
 const SYMS_DEF = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "TRX",
@@ -46,7 +47,7 @@ function berlin(ts) {
   return { date: `${p.year}-${p.month}-${p.day}`, hour: +p.hour % 24, time: `${p.hour}:${p.minute}` };
 }
 
-/* ================= Speicher (Deno KV, max. 64 KB pro Eintrag) ================= */
+/* ================= Speicher ================= */
 function freshState(cfg = DEF_CFG) {
   return { cfg: { ...cfg }, cash: cfg.startCash, positions: {}, W: EXPERTS.map(() => 1 / EXPERTS.length),
     acc: EXPERTS.map(() => ({ h: 0, n: 0 })), ai: [0, 0, 0, 0, 0, 0, 0], learnSteps: 0, paused: false,
@@ -54,16 +55,16 @@ function freshState(cfg = DEF_CFG) {
     day: null, lastDaily: "", lastWarm: 0 };
 }
 async function loadAll() {
-  const [st, bars, trades, log, eq] = await kv.getMany([["st"], ["bars"], ["trades"], ["log"], ["eq"]]);
-  const s = st.value ? { ...freshState(), ...st.value } : freshState();
+  const v = await io.getMany(["st", "bars", "trades", "log", "eq"]);
+  const s = v.st ? { ...freshState(), ...v.st } : freshState();
   s.cfg = { ...DEF_CFG, ...(s.cfg || {}) };
-  return { st: s, bars: bars.value || { t: [], s: {}, ref: {} }, trades: trades.value || [], log: log.value || [], eq: eq.value || [] };
+  return { st: s, bars: v.bars || { t: [], s: {}, ref: {} }, trades: v.trades || [], log: v.log || [], eq: v.eq || [] };
 }
 async function saveAll(D) {
   if (D.trades.length > 100) D.trades = D.trades.slice(-100);
   if (D.log.length > 80) D.log = D.log.slice(-80);
   if (D.eq.length > 1400) { const old = D.eq.slice(0, 700).filter((_, i) => i % 2 === 0); D.eq = old.concat(D.eq.slice(700)); }
-  await kv.atomic().set(["st"], D.st).set(["bars"], D.bars).set(["trades"], D.trades).set(["log"], D.log).set(["eq"], D.eq).commit();
+  await io.putMany({ st: D.st, bars: D.bars, trades: D.trades, log: D.log, eq: D.eq });
 }
 const addLog = (D, type, o) => D.log.push({ t: Date.now(), type, ...o });
 
@@ -97,18 +98,20 @@ async function fetchPrices(syms) {
 }
 // Startverlauf: letzte 2 Stunden Minutenkerzen von Binance, damit der Bot sofort bewerten kann
 async function warmup(D, syms) {
-  const series = {}; let base = null;
+  const series = {}; let base = null; let hosts = BINANCE;
   for (const s of syms) {
-    for (const h of BINANCE) {
+    for (const h of hosts) {
       try {
         const r = await fetchT(`${h}/api/v3/klines?symbol=${s}USDT&interval=1m&limit=${MAXBARS + 1}`);
         if (!r.ok) continue;
+        hosts = [h];
         const rows = (await r.json()).slice(0, -1); // letzte (laufende) Minute weglassen
         series[s] = new Map(rows.map((k) => [Math.floor(k[0] / 60000) + 1, +k[4]]));
         if (!base || rows.length > base.length) base = rows.map((k) => Math.floor(k[0] / 60000) + 1);
         break;
       } catch (_) { /* nächster Server */ }
     }
+    if (!base && hosts === BINANCE && s === syms[1]) break; // Binance nicht erreichbar → nicht weiter versuchen
   }
   if (!base) return 0;
   D.bars.t = base;
@@ -296,8 +299,6 @@ async function tick(force = false) {
   } finally { running = false; }
 }
 
-/* ================= Zeitplan: jede Minute ================= */
-Deno.cron("ki-trading-bot", "* * * * *", async () => { await tick(); });
 
 /* ================= Web-Schnittstelle für die App ================= */
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
@@ -317,7 +318,7 @@ async function stateJson() {
 
 async function action(body) {
   const key = env("BOT_KEY");
-  if (!key) return json({ ok: false, err: "BOT_KEY ist im Deno-Dashboard nicht gesetzt – Steuerung deaktiviert." }, 403);
+  if (!key) return json({ ok: false, err: "BOT_KEY ist bei Cloudflare nicht gesetzt – Steuerung deaktiviert." }, 403);
   if (body.key !== key) return json({ ok: false, err: "Falscher Bot-Schlüssel." }, 403);
   if (body.action === "tick") return json(await tick(true));
   if (body.action === "test") {
@@ -353,7 +354,7 @@ async function action(body) {
   return json({ ok: true });
 }
 
-Deno.serve(async (req) => {
+async function handle(req) {
   const url = new URL(req.url);
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   try {
@@ -367,4 +368,7 @@ Deno.serve(async (req) => {
     }
     return json({ ok: false, err: "Nicht gefunden" }, 404);
   } catch (e) { return json({ ok: false, err: String(e && e.message || e) }, 500); }
-});
+}
+
+return { tick, handle };
+}

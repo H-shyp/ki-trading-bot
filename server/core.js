@@ -292,9 +292,11 @@ let lastNotifyErr = "", lastNotifyOk = 0;
 async function notify(n) {
   const topic = env("NTFY_TOPIC"); if (!topic) { lastNotifyErr = "NTFY_TOPIC ist nicht gesetzt"; return false; }
   const errs = [];
+  // Mit eigenem ntfy-Konto (NTFY_TOKEN) gilt dein eigenes Tageslimit statt des geteilten Cloudflare-Limits
+  const tok = env("NTFY_TOKEN"); const auth = tok ? { Authorization: "Bearer " + tok } : {};
   // Weg 1: JSON an ntfy.sh
   try {
-    const r = await fetchT("https://ntfy.sh/", 8000, { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await fetchT("https://ntfy.sh/", 8000, { method: "POST", headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify({ topic, title: n.title, message: n.msg, tags: n.tags || [], priority: n.prio || 3 }) });
     if (r.ok) { lastNotifyErr = ""; lastNotifyOk = Date.now(); return true; }
     errs.push("JSON " + r.status + " " + (await r.text()).slice(0, 120));
@@ -302,11 +304,14 @@ async function notify(n) {
   // Weg 2: Text direkt an den Kanal, Titel als Adress-Parameter
   try {
     const q = new URLSearchParams({ title: n.title, tags: (n.tags || []).join(","), priority: String(n.prio || 3) });
-    const r = await fetchT(`https://ntfy.sh/${encodeURIComponent(topic)}?${q}`, 8000, { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: n.msg });
+    const r = await fetchT(`https://ntfy.sh/${encodeURIComponent(topic)}?${q}`, 8000, { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8", ...auth }, body: n.msg });
     if (r.ok) { lastNotifyErr = ""; lastNotifyOk = Date.now(); return true; }
     errs.push("Text " + r.status + " " + (await r.text()).slice(0, 120));
   } catch (e) { errs.push("Text " + (e.message || e.name)); }
-  lastNotifyErr = errs.join(" | "); return false;
+  lastNotifyErr = errs.join(" | ");
+  if (!tok && /429/.test(lastNotifyErr)) lastNotifyErr = "Tageslimit der geteilten Cloudflare-Adresse erreicht – lege ein kostenloses ntfy-Konto an und trage den Zugangs-Token als NTFY_TOKEN bei Cloudflare ein. (" + lastNotifyErr.slice(0, 60) + "…)";
+  if (tok && /401|403/.test(lastNotifyErr)) lastNotifyErr = "NTFY_TOKEN wird nicht akzeptiert – prüfe, ob er vollständig kopiert ist (beginnt mit tk_). (" + lastNotifyErr.slice(0, 60) + "…)";
+  return false;
 }
 function dailyCheck(D) {
   const st = D.st, b = berlin(Date.now()), eq = equity(D);

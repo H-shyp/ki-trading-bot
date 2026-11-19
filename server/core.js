@@ -288,13 +288,25 @@ function botStep(D) {
 }
 
 /* ================= Benachrichtigungen (ntfy) ================= */
+let lastNotifyErr = "", lastNotifyOk = 0;
 async function notify(n) {
-  const topic = env("NTFY_TOPIC"); if (!topic) return false;
+  const topic = env("NTFY_TOPIC"); if (!topic) { lastNotifyErr = "NTFY_TOPIC ist nicht gesetzt"; return false; }
+  const errs = [];
+  // Weg 1: JSON an ntfy.sh
   try {
     const r = await fetchT("https://ntfy.sh/", 8000, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ topic, title: n.title, message: n.msg, tags: n.tags || [], priority: n.prio || 3 }) });
-    return r.ok;
-  } catch (_) { return false; }
+    if (r.ok) { lastNotifyErr = ""; lastNotifyOk = Date.now(); return true; }
+    errs.push("JSON " + r.status + " " + (await r.text()).slice(0, 120));
+  } catch (e) { errs.push("JSON " + (e.message || e.name)); }
+  // Weg 2: Text direkt an den Kanal, Titel als Adress-Parameter
+  try {
+    const q = new URLSearchParams({ title: n.title, tags: (n.tags || []).join(","), priority: String(n.prio || 3) });
+    const r = await fetchT(`https://ntfy.sh/${encodeURIComponent(topic)}?${q}`, 8000, { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: n.msg });
+    if (r.ok) { lastNotifyErr = ""; lastNotifyOk = Date.now(); return true; }
+    errs.push("Text " + r.status + " " + (await r.text()).slice(0, 120));
+  } catch (e) { errs.push("Text " + (e.message || e.name)); }
+  lastNotifyErr = errs.join(" | "); return false;
 }
 function dailyCheck(D) {
   const st = D.st, b = berlin(Date.now()), eq = equity(D);
@@ -372,7 +384,7 @@ async function stateJson() {
   const cfg = { ...st.cfg };
   return { ok: true, now: Date.now(), lastRun: st.lastRun, source: st.source, srcErr: st.srcErr, paused: st.paused, createdAt: st.createdAt,
     cfg, cash: st.cash, equity: equity(D), positions: st.positions, trades: D.trades, log: D.log, eq: D.eq,
-    W: st.W, acc: st.acc, learnSteps: st.learnSteps, stats: st.stats, notify: !!env("NTFY_TOPIC"), control: !!env("BOT_KEY"),
+    W: st.W, acc: st.acc, learnSteps: st.learnSteps, stats: st.stats, notify: !!env("NTFY_TOPIC"), notifyErr: lastNotifyErr, notifyOk: lastNotifyOk, control: !!env("BOT_KEY"),
     bars: { t: b.t, s: b.s, ref: b.ref || {} }, scores: st.lastScores || {} };
 }
 
@@ -383,7 +395,7 @@ async function action(body) {
   if (body.action === "tick") return json(await tick(true));
   if (body.action === "test") {
     const ok = await notify({ title: "🔔 Test vom KI Trading Bot", msg: "Wenn du das liest, kommen die Nachrichten an!", tags: ["bell"] });
-    return json({ ok, err: ok ? "" : (env("NTFY_TOPIC") ? "ntfy nicht erreichbar" : "NTFY_TOPIC ist nicht gesetzt") });
+    return json({ ok, err: ok ? "" : "ntfy hat abgelehnt: " + lastNotifyErr });
   }
   const D = await loadAll(); D.notes = []; const st = D.st;
   // aktuelle Kurse für manuelle Verkäufe

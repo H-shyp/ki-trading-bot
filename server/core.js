@@ -19,9 +19,9 @@ const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
 const DEF_CFG = { startCash: 10000, maxPosPct: 15, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
-  buyTh: 0.3, sellTh: -0.15, trendFilter: true, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
+  buyTh: 0.35, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
-const H = 3, WARM = 30, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
+const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
 const BINANCE = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
 
 /* ================= Helfer ================= */
@@ -59,6 +59,7 @@ async function loadAll() {
   const v = await io.getMany(["st", "bars", "trades", "log", "eq"]);
   const s = v.st ? { ...freshState(), ...v.st } : freshState();
   s.cfg = { ...DEF_CFG, ...(s.cfg || {}) };
+  if (!s.cfgV || s.cfgV < 2) { s.cfg.buyTh = Math.max(s.cfg.buyTh, DEF_CFG.buyTh); s.cfg.sellTh = Math.min(s.cfg.sellTh, DEF_CFG.sellTh); s.cfgV = 2; normW(s); }
   return { st: s, bars: v.bars || { t: [], s: {}, ref: {} }, trades: v.trades || [], log: v.log || [], eq: v.eq || [] };
 }
 async function saveAll(D) {
@@ -212,8 +213,12 @@ function analyze(c, st) {
   return { p, vol, rsi, ex, x, score: clamp(score, -1, 1), trend, pAI };
 }
 function normW(st) {
-  let s = st.W.reduce((a, b) => a + b, 0); st.W = st.W.map((w) => Math.max(w / s, 0.04));
-  s = st.W.reduce((a, b) => a + b, 0); st.W = st.W.map((w) => w / s);
+  // Gewichte normieren: jeder Experte mind. 4 %, keiner über 40 % – damit nicht einer allein entscheidet
+  let w = st.W.map((x) => Math.max(x, 1e-6));
+  for (let k = 0; k < 6; k++) {
+    const sum = w.reduce((a, b) => a + b, 0); w = w.map((x) => clamp(x / sum, 0.04, WMAX));
+  }
+  const sum = w.reduce((a, b) => a + b, 0); st.W = w.map((x) => x / sum);
 }
 function learnFrom(st, a, p1) {
   const ret = p1 / a.p - 1; if (Math.abs(ret) < a.vol * 0.5) return;
@@ -249,7 +254,7 @@ function sell(D, s, reason) {
   st.cash += gross - fee;
   const pnl = gross - fee - (pos.qty * pos.avg + pos.fee), pnlPct = pnl / (pos.qty * pos.avg);
   delete st.positions[s];
-  st.cool[s] = (D.bars.t.length ? D.bars.t[D.bars.t.length - 1] : 0) + 6; // 6 Minuten Pause für dieses Symbol
+  st.cool[s] = (D.bars.t.length ? D.bars.t[D.bars.t.length - 1] : 0) + (st.cfg.cooldownMin || 30); // Pause für dieses Symbol
   const S = st.stats; S.sells++; S.realized += pnl; if (pnl > 0) { S.wins++; S.sumWin += pnl; } else S.sumLoss += pnl;
   const tr = { t: Date.now(), side: "SELL", sym: s, qty: pos.qty, price: p, fee, pnl, pnlPct, held: Date.now() - pos.t, reason };
   D.trades.push(tr); addLog(D, "SELL", tr);
@@ -261,29 +266,43 @@ function sell(D, s, reason) {
   }
 }
 function botStep(D) {
-  const st = D.st, c = st.cfg, nowMin = D.bars.t[D.bars.t.length - 1] || 0;
+  const st = D.st, c = st.cfg, nowMin = D.bars.t[D.bars.t.length - 1] || 0, fee2 = 2 * c.fee / 100;
+  st.sm = st.sm || {}; st.neg = st.neg || {};
+  // Geglätteter Score: reagiert nicht auf jedes Minuten-Zucken
+  for (const [s, a] of Object.entries(D.an)) {
+    if (!a) continue;
+    st.sm[s] = st.sm[s] == null ? a.score : 0.5 * st.sm[s] + 0.5 * a.score; a.smooth = st.sm[s];
+    st.neg[s] = a.smooth <= c.sellTh ? (st.neg[s] || 0) + 1 : 0;
+  }
+  // 1) Ausstiege
   for (const s of Object.keys(st.positions)) {
     const pos = st.positions[s], pr = D.prices[s]; if (!pr) continue;
     const p = pr.price, a = D.an[s]; pos.last = p; pos.peak = Math.max(pos.peak, p);
-    const ch = p / pos.avg - 1; let r = null;
+    const ch = p / pos.avg - 1, heldMin = (Date.now() - pos.t) / 60000; let r = null;
     if (ch <= -c.sl / 100) r = `Stop-Loss ausgelöst (${pct(ch)})`;
     else if (ch >= c.tp / 100) r = `Gewinnziel erreicht (${pct(ch)})`;
     else if (c.trail > 0 && pos.peak / pos.avg - 1 >= c.trail / 100 && p <= pos.peak * (1 - c.trail / 100)) r = `Trailing-Stop: ${nf(c.trail, 1)} % unter dem Hoch – Gewinn gesichert (${pct(ch)})`;
-    else if (a && a.score <= c.sellTh) r = `KI-Signal dreht negativ (Score ${sc(a.score)})`;
-    else if (a && c.trendFilter && a.trend === "down" && a.score < 0) r = `Abwärtstrend erkannt (Score ${sc(a.score)})`;
-    if (r) sell(D, s, r);
+    // Signal-Ausstieg erst nach Mindesthaltedauer und wenn das Signal mehrere Minuten lang klar negativ ist
+    else if (a && heldMin >= c.minHoldMin && (st.neg[s] || 0) >= c.confirmTicks) r = `KI-Signal seit ${st.neg[s]} Min. klar negativ (Score ${sc(a.smooth)})`;
+    // Zeitstopp: nach langer Zeit ohne Bewegung Kapital für bessere Chancen freigeben
+    else if (heldMin >= c.maxHoldMin && Math.abs(ch) < fee2 * 2) r = `Keine Bewegung seit ${dur(heldMin * 60000)} – Kapital wird freigegeben (${pct(ch)})`;
+    if (r) { sell(D, s, r); st.neg[s] = 0; }
   }
   if (st.paused) return;
+  // 2) Einstiege: nur klare Aufwärtstrends mit genug Bewegung, damit sich die Gebühren lohnen
   const eq = equity(D);
-  const cands = Object.entries(D.an).filter(([s, a]) => a && D.prices[s] && !st.positions[s] && a.score >= c.buyTh
-    && (st.cool[s] || 0) <= nowMin && !(c.trendFilter && a.trend === "down")).sort((x, y) => y[1].score - x[1].score);
+  const cands = Object.entries(D.an).filter(([s, a]) => a && D.prices[s] && !st.positions[s]
+    && a.score >= c.buyTh && a.smooth >= c.buyTh * 0.8
+    && (!c.trendFilter || a.trend === "up")
+    && a.vol * Math.sqrt(c.minHoldMin) >= fee2 * 2.5
+    && (st.cool[s] || 0) <= nowMin).sort((x, y) => y[1].smooth - x[1].smooth);
   for (const [s, a] of cands) {
     if (Object.keys(st.positions).length >= c.maxPositions) break;
-    const strength = clamp((a.score - c.buyTh) / Math.max(0.05, 1 - c.buyTh), 0, 1);
+    const strength = clamp((a.smooth - c.buyTh) / Math.max(0.05, 1 - c.buyTh), 0, 1);
     const budget = Math.min(eq * c.maxPosPct / 100 * (0.6 + 0.4 * strength), st.cash);
     if (budget < Math.max(10, eq * 0.01)) break;
     let bi = 0, bv = -9; a.ex.forEach((e, i) => { const v = st.W[i] * e; if (v > bv) { bv = v; bi = i; } });
-    buy(D, s, budget, `KI-Score ${sc(a.score)} · Trend ${trendTxt(a.trend)} · RSI ${nf(a.rsi, 0)} · stärkstes Signal: ${EXPERTS[bi]} (${sc(a.ex[bi])})`);
+    buy(D, s, budget, `KI-Score ${sc(a.smooth)} · Trend ${trendTxt(a.trend)} · RSI ${nf(a.rsi, 0)} · stärkstes Signal: ${EXPERTS[bi]} (${sc(a.ex[bi])})`);
   }
 }
 

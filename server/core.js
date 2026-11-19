@@ -313,6 +313,53 @@ async function notify(n) {
   if (tok && /401|403/.test(lastNotifyErr)) lastNotifyErr = "NTFY_TOKEN wird nicht akzeptiert – prüfe, ob er vollständig kopiert ist (beginnt mit tk_). (" + lastNotifyErr.slice(0, 60) + "…)";
   return false;
 }
+/* ================= Push direkt aufs Handy (Web Push) ================= */
+// Der Server schickt nur ein „Anklopfen“ ohne Inhalt. Die App auf dem Handy holt sich dann
+// die neuen Nachrichten über /api/notes und zeigt sie an. So braucht es keine Verschlüsselung
+// und keinen fremden Dienst – nur den Push-Dienst von Apple/Google.
+const b64u = (buf) => { let s = ""; for (const x of new Uint8Array(buf)) s += String.fromCharCode(x); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+let lastPushErr = "";
+async function vapid() {
+  let v = (await io.getMany(["vapid"])).vapid;
+  if (!v) {
+    const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    v = { pub: b64u(await crypto.subtle.exportKey("raw", kp.publicKey)), jwk: await crypto.subtle.exportKey("jwk", kp.privateKey) };
+    await io.putMany({ vapid: v });
+  }
+  return v;
+}
+async function vapidJwt(aud, v) {
+  const enc = (o) => b64u(new TextEncoder().encode(JSON.stringify(o)));
+  const unsigned = enc({ typ: "JWT", alg: "ES256" }) + "." + enc({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: "https://h-shyp.github.io/ki-trading-bot/" });
+  const key = await crypto.subtle.importKey("jwk", v.jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(unsigned));
+  return unsigned + "." + b64u(sig);
+}
+async function webPushAll() {
+  const push = (await io.getMany(["push"])).push || []; if (!push.length) { lastPushErr = "Noch kein Handy angemeldet"; return 0; }
+  const v = await vapid(); let sent = 0; const keep = [], errs = [];
+  for (const s of push) {
+    try {
+      const jwt = await vapidJwt(new URL(s.endpoint).origin, v);
+      const r = await fetch(s.endpoint, { method: "POST", headers: { Authorization: `vapid t=${jwt}, k=${v.pub}`, TTL: "86400", Urgency: "high", "Content-Length": "0" } });
+      if (r.status === 404 || r.status === 410) { errs.push("Handy hat sich abgemeldet"); continue; }
+      keep.push(s); if (r.ok) sent++; else errs.push("Push " + r.status + " " + (await r.text()).slice(0, 100));
+    } catch (e) { keep.push(s); errs.push("Push " + String(e.message || e)); }
+  }
+  if (keep.length !== push.length) await io.putMany({ push: keep });
+  lastPushErr = errs.join(" | "); return sent;
+}
+// Nachrichten speichern (für /api/notes) und zustellen: Push aufs Handy, zusätzlich ntfy falls eingerichtet
+async function deliver(notes) {
+  if (!notes || !notes.length) return { push: 0, ntfy: false };
+  const old = (await io.getMany(["notes"])).notes || []; const now = Date.now();
+  const add = notes.map((n, i) => ({ t: now + i, title: n.title, msg: n.msg }));
+  await io.putMany({ notes: old.concat(add).slice(-30) });
+  const push = await webPushAll();
+  let ntfy = false; if (env("NTFY_TOPIC")) for (const n of notes) ntfy = (await notify(n)) || ntfy;
+  return { push, ntfy };
+}
+
 function dailyCheck(D) {
   const st = D.st, b = berlin(Date.now()), eq = equity(D);
   if (!st.day || st.day.date !== b.date) st.day = { date: b.date, eq };
@@ -371,7 +418,7 @@ async function tick(force = false) {
     st.lastRun = now; st.lastScores = Object.fromEntries(Object.entries(D.an).filter(([, a]) => a).map(([s, a]) => [s,
       { score: +a.score.toFixed(3), trend: a.trend, rsi: +a.rsi.toFixed(1), pAI: +a.pAI.toFixed(3), ex: a.ex.map((e) => +e.toFixed(3)) }]));
     await saveAll(D);
-    for (const n of D.notes) await notify(n);
+    await deliver(D.notes);
     return { ok: true, src: pr.src, trades: D.notes.length };
   } finally { running = false; }
 }
@@ -390,7 +437,8 @@ async function stateJson() {
   return { ok: true, now: Date.now(), lastRun: st.lastRun, source: st.source, srcErr: st.srcErr, paused: st.paused, createdAt: st.createdAt,
     cfg, cash: st.cash, equity: equity(D), positions: st.positions, trades: D.trades, log: D.log, eq: D.eq,
     W: st.W, acc: st.acc, learnSteps: st.learnSteps, stats: st.stats, notify: !!env("NTFY_TOPIC"), notifyErr: lastNotifyErr, notifyOk: lastNotifyOk, control: !!env("BOT_KEY"),
-    bars: { t: b.t, s: b.s, ref: b.ref || {} }, scores: st.lastScores || {} };
+    bars: { t: b.t, s: b.s, ref: b.ref || {} }, scores: st.lastScores || {},
+    vapidPublic: (await vapid()).pub, pushDevices: ((await io.getMany(["push"])).push || []).length, pushErr: lastPushErr };
 }
 
 async function action(body) {
@@ -399,8 +447,17 @@ async function action(body) {
   if (body.key !== key) return json({ ok: false, err: "Falscher Bot-Schlüssel." }, 403);
   if (body.action === "tick") return json(await tick(true));
   if (body.action === "test") {
-    const ok = await notify({ title: "🔔 Test vom KI Trading Bot", msg: "Wenn du das liest, kommen die Nachrichten an!", tags: ["bell"] });
-    return json({ ok, err: ok ? "" : "ntfy hat abgelehnt: " + lastNotifyErr });
+    const r = await deliver([{ title: "🔔 Test vom KI Trading Bot", msg: "Wenn du das liest, kommen die Nachrichten an!", tags: ["bell"] }]);
+    const ok = r.push > 0 || r.ntfy;
+    return json({ ok, push: r.push, err: ok ? "" : (lastPushErr || "Push nicht möglich") + (env("NTFY_TOPIC") ? " · ntfy: " + lastNotifyErr.slice(0, 80) : "") });
+  }
+  if (body.action === "subscribe") {
+    const sub = body.sub || {};
+    if (!/^https:\/\//.test(sub.endpoint || "")) return json({ ok: false, err: "Ungültige Anmeldung" }, 400);
+    const push = ((await io.getMany(["push"])).push || []).filter((x) => x.endpoint !== sub.endpoint);
+    push.push({ endpoint: sub.endpoint, t: Date.now() });
+    await io.putMany({ push: push.slice(-5) });
+    return json({ ok: true, devices: Math.min(push.length, 5) });
   }
   const D = await loadAll(); D.notes = []; const st = D.st;
   // aktuelle Kurse für manuelle Verkäufe
@@ -427,7 +484,7 @@ async function action(body) {
     }
     default: return json({ ok: false, err: "Unbekannte Aktion" }, 400);
   }
-  await saveAll(D); for (const n of D.notes) await notify(n);
+  await saveAll(D); await deliver(D.notes);
   return json({ ok: true });
 }
 
@@ -436,6 +493,10 @@ async function handle(req) {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   try {
     if (url.pathname === "/api/state") return json(await stateJson());
+    if (url.pathname === "/api/notes") {
+      const since = +url.searchParams.get("since") || 0;
+      return json({ ok: true, notes: ((await io.getMany(["notes"])).notes || []).filter((n) => n.t > since).slice(-10) });
+    }
     if (url.pathname === "/api/action" && req.method === "POST") return await action(await req.json());
     if (url.pathname === "/" || url.pathname === "") {
       const D = await loadAll();

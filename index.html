@@ -8,6 +8,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="KI Bot">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c9cff'/%3E%3Cstop offset='1' stop-color='%2322c55e'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M12 44l12-12 9 8 19-20' stroke='%230b0f17' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <title>KI Trading Bot – Live Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -273,7 +275,7 @@ body:not(.srv) .srvonly{display:none !important}
         <label class="f">Server-Adresse<input id="fSrvUrl" placeholder="https://ki-trading-bot.….workers.dev" autocomplete="off" autocapitalize="off"></label>
         <label class="f">Bot-Schlüssel (BOT_KEY)<input id="fSrvKey" type="password" placeholder="nur zum Steuern nötig" autocomplete="off" autocapitalize="off"></label>
       </div>
-      <div class="srvonly" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="small" id="testNotify">🔔 Test-Nachricht senden</button><button class="small" id="forceTick">↻ Runde jetzt ausführen</button></div>
+      <div class="srvonly" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="small go" id="enablePush">📲 Nachrichten auf diesem Handy aktivieren</button><button class="small" id="testNotify">🔔 Test-Nachricht senden</button><button class="small" id="forceTick">↻ Runde jetzt ausführen</button></div>
     </div>
     <div class="srvonly fg">
       <label class="chk"><input type="checkbox" id="fNotSell"> Nachricht bei jedem Verkauf (Plus/Minus)</label>
@@ -1112,13 +1114,34 @@ function renderSrv(){
       <span>Letzte Runde <b class="num">${d.lastRun? 'vor '+dur(age) : 'noch keine'}</b></span>
       <span>Kursquelle <b>${esc(d.source||'–')}</b></span>
       <span>Takt <b>jede Minute</b></span>
-      <span>Handy-Nachrichten <b class="${d.notify?'up':'down'}">${d.notify?'an':'aus'}</b></span>
+      <span>Handy-Nachrichten <b class="${d.pushDevices?'up':'down'}">${d.pushDevices? 'an ('+d.pushDevices+' '+(d.pushDevices>1?'Geräte':'Gerät')+')' : 'aus'}</b></span>
       <span>Steuerung <b class="${SRV.key?'up':'mut'}">${SRV.key?'freigeschaltet':'nur ansehen'}</b></span></div>
     <div class="mut" style="font-size:12px;margin-top:8px">${ok? (d.paused?'Der Bot kauft gerade nichts Neues, überwacht aber offene Positionen weiter.':'Der Bot läuft rund um die Uhr auf deinem Cloudflare-Server – auch wenn dein Handy aus ist.')
       : age<180000 ? 'Der Bot läuft, bekommt aber gerade keine Kurse'+(d.srcErr?' ('+esc(d.srcErr)+')':'')+'. Er versucht es jede Minute neu.'
       : 'Der Server hat seit mehr als 3 Minuten keine Runde gemacht. Prüfe bei Cloudflare unter Workers → ki-trading-bot → Settings → Trigger, ob der Zeitplan „* * * * *“ eingetragen ist.'}</div>`;
 }
 $('#srvRefresh').onclick=()=>srvPoll();
+const isIOS=/iPhone|iPad|iPod/.test(navigator.userAgent), standalone=window.navigator.standalone===true || matchMedia('(display-mode: standalone)').matches;
+const b64uToBytes=s=>{ s=s.replace(/-/g,'+').replace(/_/g,'/'); const raw=atob(s+'='.repeat((4-s.length%4)%4)); return Uint8Array.from(raw,c=>c.charCodeAt(0)); };
+$('#enablePush').onclick=async()=>{
+  if(isIOS && !standalone){ confirmBox('Erst zum Home-Bildschirm hinzufügen','Auf dem iPhone gehen Benachrichtigungen nur, wenn die App auf dem Home-Bildschirm liegt:<br><br>1. In Safari unten auf <b>Teilen</b> tippen<br>2. <b>Zum Home-Bildschirm</b> wählen<br>3. Die App über das neue Symbol öffnen und hier nochmal tippen.',()=>{}); return; }
+  if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)){ confirmBox('Geht hier leider nicht','Dieser Browser unterstützt keine Push-Nachrichten. Auf dem iPhone braucht es iOS 16.4 oder neuer.',()=>{}); return; }
+  let perm; try{ perm=await Notification.requestPermission(); }catch(e){ perm='denied'; }
+  if(perm!=='granted'){ confirmBox('Mitteilungen nicht erlaubt','Du kannst das in den iPhone-Einstellungen unter <b>Mitteilungen → KI Bot</b> nachträglich erlauben.',()=>{}); return; }
+  try{
+    if(!srvData || !srvData.vapidPublic) await srvPoll();
+    if(!srvData || !srvData.vapidPublic){ confirmBox('Server nicht erreichbar','Die App erreicht den Bot gerade nicht. Prüfe die Server-Adresse und versuche es nochmal.',()=>{}); return; }
+    const reg=await navigator.serviceWorker.register('sw.js?srv='+encodeURIComponent(SRV.url));
+    await navigator.serviceWorker.ready;
+    const key=b64uToBytes(srvData.vapidPublic);
+    let sub=await reg.pushManager.getSubscription();
+    if(sub){ const old=sub.options&&sub.options.applicationServerKey; if(old && new Uint8Array(old).join()!==key.join()){ await sub.unsubscribe(); sub=null; } }
+    if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:key});
+    const r=await srvAction('subscribe',{sub:sub.toJSON()}); if(!r) return;
+    const t=await srvAction('test');
+    if(t) confirmBox('Fertig! 🎉','Dieses Handy bekommt jetzt die Nachrichten vom Bot. Eine Test-Nachricht ist unterwegs.',()=>{});
+  }catch(e){ confirmBox('Hat nicht geklappt', esc(String(e.message||e)), ()=>{}); }
+};
 $('#testNotify').onclick=async()=>{ const r=await srvAction('test'); if(r) confirmBox('Test gesendet','Schau auf dein Handy – in der ntfy-App sollte jetzt eine Nachricht erscheinen.',()=>{}); };
 $('#forceTick').onclick=async()=>{ const r=await srvAction('tick'); if(r) confirmBox('Runde ausgeführt', r.ok? 'Der Bot hat gerade eine Runde gemacht (Quelle: '+esc(r.src||'–')+').' : 'Keine Kurse erreichbar: '+esc(r.err||''), ()=>{}); };
 

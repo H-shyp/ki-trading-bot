@@ -21,7 +21,7 @@ const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
   APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
-const DEF_CFG = { strategy: "trend", minZ: 1.0, stopMult: 2.5, coolH: 6, startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+const DEF_CFG = { strategy: "trend", minZ: 1.0, stopMult: 2.5, coolH: 6, regime: "e50", exitRule: "e50", startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
   buyTh: 0.3, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
 const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
@@ -304,7 +304,22 @@ function trendSignal(c, cfg) {
   const z = mom72 / (vol * Math.sqrt(72));
   const buy = up && mom24 > 0 && mom72 > 0 && z >= cfg.minZ && vol >= 0.002 && vol <= 0.05;
   const stopPct = clamp(cfg.stopMult * vol * Math.sqrt(6), 0.025, 0.10);
-  return { p, e20: e20[n - 1], e50: e50[n - 1], vol, mom24, mom72, z, up, buy, stopPct };
+  const e100 = emaArr(c, 100)[n - 1];
+  return { p, e20: e20[n - 1], e50: e50[n - 1], e50up: e50[n - 1] > e50[n - 6], e100, vol, mom24, mom72, z, up, buy, stopPct };
+}
+// Marktfilter: Wann darf überhaupt gekauft werden? (gemessen an Bitcoin)
+function marketOk(btc, cfg) {
+  if (!btc || cfg.regime === "off") return true;
+  if (cfg.regime === "strict") return btc.p > btc.e50 && btc.e50up && btc.mom72 > 0;
+  if (cfg.regime === "e100") return btc.p > btc.e100 && btc.e50 > btc.e100;
+  return btc.p > btc.e50;
+}
+// Trendbruch: Wann wird verkauft, auch ohne Stop?
+function trendBroken(g, cfg) {
+  if (!g || cfg.exitRule === "trail") return false;
+  if (cfg.exitRule === "e20") return g.p < g.e20;
+  if (cfg.exitRule === "e50x") return g.p < g.e50 * 0.98;
+  return g.p < g.e50;
 }
 const hCloses = (hb, sym) => (hb.s[sym] || []).filter((v) => v != null);
 function updateHourly(D, now) {
@@ -337,8 +352,7 @@ async function warmupHourly(D, need, st) {
 function trendStep(D) {
   const st = D.st, c = st.cfg, hNow = Math.floor(Date.now() / 3600000);
   D.sig = {}; for (const sym of c.symbols) D.sig[sym] = trendSignal(hCloses(D.hb, sym), c);
-  const btc = D.sig.BTC; const marketOk = !btc || btc.p > btc.e50;
-  D.marketOk = marketOk;
+  const mOk = marketOk(D.sig.BTC, c); D.marketOk = mOk;
   // 1) Ausstiege: Trailing-Stop (live, jede Minute) oder Trendbruch (Stundenschluss unter 50er-Durchschnitt)
   for (const sym of Object.keys(st.positions)) {
     const pos = st.positions[sym], pr = D.prices[sym]; if (!pr) continue;
@@ -346,10 +360,10 @@ function trendStep(D) {
     const sp = pos.stopPct || 0.05; pos.stop = Math.max(pos.stop || pos.avg * (1 - sp), pos.peak * (1 - sp));
     const ch = p / pos.avg - 1; let r = null;
     if (p <= pos.stop) r = pos.stop > pos.avg ? `Trailing-Stop: Gewinn gesichert (${pct(ch)})` : `Stop-Loss (${pct(ch)})`;
-    else if (g && g.p < g.e50) r = `Trend gebrochen: Stundenkurs unter dem 50-Stunden-Durchschnitt (${pct(ch)})`;
+    else if (trendBroken(g, c)) r = `Trend gebrochen (${pct(ch)})`;
     if (r) sell(D, sym, r);
   }
-  if (st.paused || !marketOk) return;
+  if (st.paused || !mOk) return;
   // 2) Einstiege: stärkste Trends zuerst (Momentum im Verhältnis zur Schwankung)
   const eq = equity(D);
   const cands = Object.entries(D.sig).filter(([sym, g]) => g && g.buy && D.prices[sym] && !st.positions[sym]
@@ -374,12 +388,12 @@ function runBacktest(grid, cfg, start = 500) {
     for (const sym of Object.keys(pos)) {
       const p = at(sym, i); if (p == null) continue; const q = pos[sym];
       q.peak = Math.max(q.peak, p); q.stop = Math.max(q.stop, q.peak * (1 - q.sp));
-      if (p <= q.stop || (sig[sym] && p < sig[sym].e50)) {
+      if (p <= q.stop || trendBroken(sig[sym], cfg)) {
         const pnl = q.qty * p * (1 - f) - q.cost; cash += q.qty * p * (1 - f); trades++; if (pnl > 0) wins++; delete pos[sym]; cool[sym] = i + cfg.coolH;
       }
     }
     const eqNow = cash + Object.entries(pos).reduce((a, [sym, q]) => a + q.qty * (at(sym, i) ?? q.peak), 0);
-    const btc = sig.BTC; if (!btc || btc.p > btc.e50) {
+    if (marketOk(sig.BTC, cfg)) {
       const cands = Object.entries(sig).filter(([sym, g]) => g && g.buy && !pos[sym] && (cool[sym] || 0) <= i).sort((a, b) => b[1].z - a[1].z);
       for (const [sym, g] of cands) {
         if (Object.keys(pos).length >= cfg.maxPositions) break;
@@ -400,33 +414,29 @@ function runBacktest(grid, cfg, start = 500) {
   return { days: Math.round((T - 80) / 24), final: +final.toFixed(2), ret: +(final / start - 1).toFixed(4), trades, wins, maxDD: +maxDD.toFixed(4),
     holdAll: +holdAll.toFixed(2), holdBtc: holdBtc && +holdBtc.toFixed(2), coins: syms.length, curve };
 }
-let btCache = null;
+let btData = null;
 async function backtestJson(url) {
-  if (btCache && Date.now() - btCache.t < 30 * 60000 && !url.searchParams.get("fresh")) return btCache.res;
-  const m = await krakenPairs();
-  const syms = ["BTC", ...DEF_CFG.symbols.filter((x) => x !== "BTC" && m[x])].slice(0, 40);
-  const series = {};
-  for (const sym of syms) {
-    try {
-      const r = await fetchT(`https://api.kraken.com/0/public/OHLC?pair=${m[sym].alt}&interval=60`);
-      if (!r.ok) continue; const j = await r.json(); const rows = j.result && (j.result[m[sym].key] || j.result[m[sym].alt]);
-      if (rows) series[sym] = new Map(rows.slice(0, -1).map((k) => [Math.floor(k[0] / 3600), +k[4]]));
-    } catch (_) { /* überspringen */ }
+  if (!btData || Date.now() - btData.t > 30 * 60000 || url.searchParams.get("fresh")) {
+    const m = await krakenPairs();
+    const syms = ["BTC", ...DEF_CFG.symbols.filter((x) => x !== "BTC" && m[x])].slice(0, 40);
+    const series = {};
+    for (const sym of syms) {
+      try {
+        const r = await fetchT(`https://api.kraken.com/0/public/OHLC?pair=${m[sym].alt}&interval=60`);
+        if (!r.ok) continue; const j = await r.json(); const rows = j.result && (j.result[m[sym].key] || j.result[m[sym].alt]);
+        if (rows) series[sym] = new Map(rows.slice(0, -1).map((k) => [Math.floor(k[0] / 3600), +k[4]]));
+      } catch (_) { /* überspringen */ }
+    }
+    const hours = [...new Set(Object.values(series).flatMap((mm) => [...mm.keys()]))].sort((a, b) => a - b);
+    btData = { t: Date.now(), grid: { hours, s: Object.fromEntries(Object.entries(series).map(([sym, mm]) => [sym, hours.map((hh) => mm.get(hh) ?? null)])) } };
   }
-  const hours = [...new Set(Object.values(series).flatMap((mm) => [...mm.keys()]))].sort((a, b) => a - b);
-  const grid = { hours, s: Object.fromEntries(Object.entries(series).map(([sym, mm]) => [sym, hours.map((hh) => mm.get(hh) ?? null)])) };
-  const base = { ...DEF_CFG };
-  const variants = [
-    { name: "Standard", cfg: base },
-    { name: "Vorsichtig (nur sehr starke Trends)", cfg: { ...base, minZ: 1.5 } },
-    { name: "Mutig (auch schwächere Trends)", cfg: { ...base, minZ: 0.5 } },
-    { name: "Enger Stop", cfg: { ...base, stopMult: 1.5 } },
-    { name: "Weiter Stop", cfg: { ...base, stopMult: 3.5 } },
-    { name: "3 Positionen", cfg: { ...base, maxPositions: 3, maxPosPct: 34 } },
-    { name: "8 Positionen", cfg: { ...base, maxPositions: 8, maxPosPct: 13 } },
-  ].map((v) => ({ name: v.name, ...runBacktest(grid, v.cfg) }));
-  const res = { ok: true, at: Date.now(), coins: Object.keys(series).length, hours: hours.length, variants };
-  btCache = { t: Date.now(), res }; return res;
+  const q = url.searchParams, num = (k, d) => (q.get(k) != null && isFinite(+q.get(k)) ? +q.get(k) : d);
+  const cfg = { ...DEF_CFG, minZ: num("minZ", DEF_CFG.minZ), stopMult: num("stopMult", DEF_CFG.stopMult), maxPositions: num("maxPos", DEF_CFG.maxPositions),
+    coolH: num("coolH", DEF_CFG.coolH), regime: q.get("regime") || DEF_CFG.regime, exitRule: q.get("exit") || DEF_CFG.exitRule };
+  cfg.maxPosPct = Math.ceil(100 / cfg.maxPositions);
+  const r = runBacktest(btData.grid, cfg);
+  delete r.curve;
+  return { ok: true, coins: Object.keys(btData.grid.s).length, hours: btData.grid.hours.length, cfg: { minZ: cfg.minZ, stopMult: cfg.stopMult, maxPositions: cfg.maxPositions, regime: cfg.regime, exitRule: cfg.exitRule, coolH: cfg.coolH }, ...r };
 }
 
 function botStep(D) {

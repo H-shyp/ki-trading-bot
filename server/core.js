@@ -21,7 +21,7 @@ const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
   APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
-const DEF_CFG = { strategy: "trend", minZ: 1.0, stopMult: 2.5, coolH: 6, regime: "e50", exitRule: "e50", startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+const DEF_CFG = { strategy: "trend", mode: "trend", dipRsi: 30, dipZ: 1.5, dipMaxH: 48, dipStop: 2.0, minZ: 1.0, stopMult: 2.5, coolH: 6, regime: "e50", exitRule: "e50", startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
   buyTh: 0.3, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
 const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
@@ -304,8 +304,10 @@ function trendSignal(c, cfg) {
   const z = mom72 / (vol * Math.sqrt(72));
   const buy = up && mom24 > 0 && mom72 > 0 && z >= cfg.minZ && vol >= 0.002 && vol <= 0.05;
   const stopPct = clamp(cfg.stopMult * vol * Math.sqrt(6), 0.025, 0.10);
-  const e100 = emaArr(c, 100)[n - 1];
-  return { p, e20: e20[n - 1], e50: e50[n - 1], e50up: e50[n - 1] > e50[n - 6], e100, vol, mom24, mom72, z, up, buy, stopPct };
+  const e100 = emaArr(c, 100)[n - 1], rsi = rsiCalc(c.slice(-60));
+  // Dip: kurzfristig stark gefallen (unter dem 20er-Durchschnitt) und überverkauft
+  const dipZ = (p / e20[n - 1] - 1) / (vol * Math.sqrt(6));
+  return { rsi, dipZ, p, e20: e20[n - 1], e50: e50[n - 1], e50up: e50[n - 1] > e50[n - 6], e100, vol, mom24, mom72, z, up, buy, stopPct };
 }
 // Marktfilter: Wann darf überhaupt gekauft werden? (gemessen an Bitcoin)
 function marketOk(btc, cfg) {
@@ -349,6 +351,17 @@ async function warmupHourly(D, need, st) {
   for (const x of st.cfg.symbols) if (!hb.s[x]) hb.s[x] = hb.t.map(() => null);
   return got.length;
 }
+// Kaufsignal je nach Taktik
+function entrySignal(g, cfg) {
+  if (!g) return false;
+  if (cfg.mode === "dip") return g.rsi <= cfg.dipRsi && g.dipZ <= -cfg.dipZ && g.vol >= 0.002 && g.vol <= 0.05;
+  return g.buy;
+}
+function exitSignal(g, cfg, heldH) {
+  if (!g) return false;
+  if (cfg.mode === "dip") return g.p >= g.e20 || heldH >= cfg.dipMaxH;
+  return trendBroken(g, cfg);
+}
 function trendStep(D) {
   const st = D.st, c = st.cfg, hNow = Math.floor(Date.now() / 3600000);
   D.sig = {}; for (const sym of c.symbols) D.sig[sym] = trendSignal(hCloses(D.hb, sym), c);
@@ -383,23 +396,25 @@ function runBacktest(grid, cfg, start = 500) {
   const syms = Object.keys(grid.s), T = grid.hours.length, f = cfg.fee / 100;
   let cash = start, peakEq = start, maxDD = 0; const pos = {}, cool = {}; let trades = 0, wins = 0; const curve = [];
   const at = (sym, i) => grid.s[sym][i];
+  const dip = cfg.mode === "dip";
   for (let i = 80; i < T; i++) {
     const sig = {}; for (const sym of syms) { const c = grid.s[sym].slice(Math.max(0, i - HMAX + 1), i + 1).filter((v) => v != null); sig[sym] = c.length >= 80 && at(sym, i) != null ? trendSignal(c, cfg) : null; }
     for (const sym of Object.keys(pos)) {
       const p = at(sym, i); if (p == null) continue; const q = pos[sym];
-      q.peak = Math.max(q.peak, p); q.stop = Math.max(q.stop, q.peak * (1 - q.sp));
-      if (p <= q.stop || trendBroken(sig[sym], cfg)) {
+      q.peak = Math.max(q.peak, p); if (!dip) q.stop = Math.max(q.stop, q.peak * (1 - q.sp));
+      if (p <= q.stop || exitSignal(sig[sym], cfg, i - q.i)) {
         const pnl = q.qty * p * (1 - f) - q.cost; cash += q.qty * p * (1 - f); trades++; if (pnl > 0) wins++; delete pos[sym]; cool[sym] = i + cfg.coolH;
       }
     }
     const eqNow = cash + Object.entries(pos).reduce((a, [sym, q]) => a + q.qty * (at(sym, i) ?? q.peak), 0);
-    if (marketOk(sig.BTC, cfg)) {
-      const cands = Object.entries(sig).filter(([sym, g]) => g && g.buy && !pos[sym] && (cool[sym] || 0) <= i).sort((a, b) => b[1].z - a[1].z);
+    if (dip ? !(sig.BTC && sig.BTC.mom24 < -cfg.btcCrash) : marketOk(sig.BTC, cfg)) {
+      const cands = Object.entries(sig).filter(([sym, g]) => entrySignal(g, cfg) && !pos[sym] && (cool[sym] || 0) <= i).sort((a, b) => dip ? a[1].dipZ - b[1].dipZ : b[1].z - a[1].z);
       for (const [sym, g] of cands) {
         if (Object.keys(pos).length >= cfg.maxPositions) break;
         const budget = Math.min(eqNow / cfg.maxPositions, eqNow * cfg.maxPosPct / 100, cash); if (budget < 10) break;
         const p = at(sym, i); const qty = budget / (p * (1 + f)); cash -= qty * p * (1 + f);
-        pos[sym] = { qty, cost: qty * p * (1 + f), peak: p, sp: g.stopPct, stop: p * (1 - g.stopPct) };
+        const sp = dip ? clamp(cfg.dipStop * g.vol * Math.sqrt(6), 0.02, 0.10) : g.stopPct;
+        pos[sym] = { qty, cost: qty * p * (1 + f), peak: p, sp, stop: p * (1 - sp), i };
       }
     }
     const eqEnd = cash + Object.entries(pos).reduce((a, [sym, q]) => a + q.qty * (at(sym, i) ?? q.peak), 0);
@@ -432,11 +447,13 @@ async function backtestJson(url) {
   }
   const q = url.searchParams, num = (k, d) => (q.get(k) != null && isFinite(+q.get(k)) ? +q.get(k) : d);
   const cfg = { ...DEF_CFG, minZ: num("minZ", DEF_CFG.minZ), stopMult: num("stopMult", DEF_CFG.stopMult), maxPositions: num("maxPos", DEF_CFG.maxPositions),
-    coolH: num("coolH", DEF_CFG.coolH), regime: q.get("regime") || DEF_CFG.regime, exitRule: q.get("exit") || DEF_CFG.exitRule };
+    coolH: num("coolH", DEF_CFG.coolH), regime: q.get("regime") || DEF_CFG.regime, exitRule: q.get("exit") || DEF_CFG.exitRule,
+    mode: q.get("mode") || DEF_CFG.mode, dipRsi: num("rsi", DEF_CFG.dipRsi), dipZ: num("dz", DEF_CFG.dipZ), dipMaxH: num("maxH", DEF_CFG.dipMaxH),
+    dipStop: num("ds", DEF_CFG.dipStop), btcCrash: num("crash", 0.05) };
   cfg.maxPosPct = Math.ceil(100 / cfg.maxPositions);
   const r = runBacktest(btData.grid, cfg);
   delete r.curve;
-  return { ok: true, coins: Object.keys(btData.grid.s).length, hours: btData.grid.hours.length, cfg: { minZ: cfg.minZ, stopMult: cfg.stopMult, maxPositions: cfg.maxPositions, regime: cfg.regime, exitRule: cfg.exitRule, coolH: cfg.coolH }, ...r };
+  return { ok: true, coins: Object.keys(btData.grid.s).length, hours: btData.grid.hours.length, cfg: { mode: cfg.mode, dipRsi: cfg.dipRsi, dipZ: cfg.dipZ, dipMaxH: cfg.dipMaxH, dipStop: cfg.dipStop, minZ: cfg.minZ, stopMult: cfg.stopMult, maxPositions: cfg.maxPositions, regime: cfg.regime, exitRule: cfg.exitRule, coolH: cfg.coolH }, ...r };
 }
 
 function botStep(D) {

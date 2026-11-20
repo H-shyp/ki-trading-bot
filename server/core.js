@@ -21,7 +21,7 @@ const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
   APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
-const DEF_CFG = { startCash: 500, maxPosPct: 12, maxPositions: 8, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+const DEF_CFG = { strategy: "trend", minZ: 1.0, stopMult: 2.5, coolH: 6, startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
   buyTh: 0.3, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
 const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
@@ -59,26 +59,33 @@ function freshState(cfg = DEF_CFG) {
     day: null, lastDaily: "", lastWarm: 0 };
 }
 async function loadAll() {
-  const v = await io.getMany(["st", "bars", "trades", "log", "eq"]);
+  const v = await io.getMany(["st", "bars", "trades", "log", "eq", "hb"]);
+  const hb = v.hb || { t: [], s: {} };
   const s = v.st ? { ...freshState(), ...v.st } : freshState();
   s.cfg = { ...DEF_CFG, ...(s.cfg || {}) };
   if (!s.cfgV || s.cfgV < 2) { s.cfg.buyTh = Math.max(s.cfg.buyTh, DEF_CFG.buyTh); s.cfg.sellTh = Math.min(s.cfg.sellTh, DEF_CFG.sellTh); s.cfgV = 2; normW(s); }
   if (s.cfgV >= 3 && s.cfgV < 4) {
     s.cfg.symbols = SYMS_DEF; s.cfg.maxPositions = DEF_CFG.maxPositions; s.cfg.maxPosPct = DEF_CFG.maxPosPct; s.cfg.buyTh = DEF_CFG.buyTh; s.cfgV = 4;
   }
+  if (s.cfgV >= 3 && s.cfgV < 5) { // Neue Taktik (Stunden-Trendfolge) + kompletter Neustart mit 500 $ (Wunsch vom 20.11.)
+    const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm };
+    const n = { ...freshState({ ...DEF_CFG }), ...keep, cfgV: 5 };
+    return { st: n, hb, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
+      log: [{ t: Date.now(), type: "INFO", msg: "Neustart mit 500,00 $ und neuer Taktik: Trendfolge auf Stundenbasis mit Marktfilter." }] };
+  }
   if (s.cfgV < 3) { // Neustart mit 500 $ Spielgeld (Wunsch vom 19.11.); das Gelernte der KI bleibt
     const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm };
-    const n = { ...freshState({ ...s.cfg, ...DEF_CFG, startCash: 500 }), ...keep, cfgV: 4 };
-    return { st: n, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
+    const n = { ...freshState({ ...DEF_CFG }), ...keep, cfgV: 5 };
+    return { st: n, hb, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
       log: [{ t: Date.now(), type: "INFO", msg: "Neues Depot mit 500,00 $ Spielgeld gestartet. Das Gelernte der KI bleibt erhalten." }] };
   }
-  return { st: s, bars: v.bars || { t: [], s: {}, ref: {} }, trades: v.trades || [], log: v.log || [], eq: v.eq || [] };
+  return { st: s, hb, bars: v.bars || { t: [], s: {}, ref: {} }, trades: v.trades || [], log: v.log || [], eq: v.eq || [] };
 }
 async function saveAll(D) {
   if (D.trades.length > 100) D.trades = D.trades.slice(-100);
   if (D.log.length > 80) D.log = D.log.slice(-80);
   if (D.eq.length > 1400) { const old = D.eq.slice(0, 700).filter((_, i) => i % 2 === 0); D.eq = old.concat(D.eq.slice(700)); }
-  await io.putMany({ st: D.st, bars: D.bars, trades: D.trades, log: D.log, eq: D.eq });
+  await io.putMany({ st: D.st, bars: D.bars, trades: D.trades, log: D.log, eq: D.eq, hb: D.hb });
 }
 const addLog = (D, type, o) => D.log.push({ t: Date.now(), type, ...o });
 
@@ -264,6 +271,7 @@ function sell(D, s, reason) {
   const pnl = gross - fee - (pos.qty * pos.avg + pos.fee), pnlPct = pnl / (pos.qty * pos.avg);
   delete st.positions[s];
   st.cool[s] = (D.bars.t.length ? D.bars.t[D.bars.t.length - 1] : 0) + (st.cfg.cooldownMin || 30); // Pause für dieses Symbol
+  st.coolH = st.coolH || {}; st.coolH[s] = Math.floor(Date.now() / 3600000) + (st.cfg.coolH || 6);
   const S = st.stats; S.sells++; S.realized += pnl; if (pnl > 0) { S.wins++; S.sumWin += pnl; } else S.sumLoss += pnl;
   const tr = { t: Date.now(), side: "SELL", sym: s, qty: pos.qty, price: p, fee, pnl, pnlPct, held: Date.now() - pos.t, reason };
   D.trades.push(tr); addLog(D, "SELL", tr);
@@ -274,6 +282,153 @@ function sell(D, s, reason) {
       tags: [pnl > 0 ? "white_check_mark" : "x"], prio: 3 });
   }
 }
+/* ================= Taktik: Trendfolge auf Stundenbasis ================= */
+// Idee: Nur Coins kaufen, die seit Tagen stabil steigen (über ihren Durchschnitten, positives Momentum),
+// und nur wenn auch Bitcoin im Aufwärtstrend ist. Verkauf per Trailing-Stop oder wenn der Trend bricht.
+const HMAX = 150;
+async function klinesKrakenH(sym, keep = HMAX) {
+  const m = await krakenPairs(); if (!m[sym]) return null;
+  const r = await fetchT(`https://api.kraken.com/0/public/OHLC?pair=${m[sym].alt}&interval=60`);
+  if (!r.ok) return null;
+  const j = await r.json(); const rows = j.result && (j.result[m[sym].key] || j.result[m[sym].alt]); if (!rows) return null;
+  return rows.slice(-(keep + 1), -1).map((k) => [Math.floor(k[0] / 3600), +k[4]]); // nur fertige Stunden
+}
+function trendSignal(c, cfg) {
+  const n = c.length; if (n < 80) return null;
+  const e20 = emaArr(c, 20), e50 = emaArr(c, 50), p = c[n - 1];
+  const rets = []; for (let i = n - 48; i < n; i++) rets.push(c[i] / c[i - 1] - 1);
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const vol = Math.max(Math.sqrt(rets.reduce((x, r) => x + (r - mean) ** 2, 0) / rets.length), 1e-4);
+  const mom24 = p / c[n - 25] - 1, mom72 = p / c[n - 73] - 1;
+  const up = p > e20[n - 1] && e20[n - 1] > e50[n - 1] && e50[n - 1] > e50[n - 6];
+  const z = mom72 / (vol * Math.sqrt(72));
+  const buy = up && mom24 > 0 && mom72 > 0 && z >= cfg.minZ && vol >= 0.002 && vol <= 0.05;
+  const stopPct = clamp(cfg.stopMult * vol * Math.sqrt(6), 0.025, 0.10);
+  return { p, e20: e20[n - 1], e50: e50[n - 1], vol, mom24, mom72, z, up, buy, stopPct };
+}
+const hCloses = (hb, sym) => (hb.s[sym] || []).filter((v) => v != null);
+function updateHourly(D, now) {
+  // Jede Stunde den letzten Kurs der abgelaufenen Stunde als Schlusskurs speichern
+  const st = D.st, h = Math.floor(now / 3600000), hb = D.hb;
+  if (!st.hCur || st.hCur.h !== h) {
+    if (st.hCur && st.hCur.h > (hb.t[hb.t.length - 1] ?? -1)) {
+      hb.t.push(st.hCur.h);
+      for (const sym of st.cfg.symbols) { if (!hb.s[sym]) hb.s[sym] = hb.t.slice(0, -1).map(() => null); hb.s[sym].push(st.hCur.p[sym] ?? null); }
+      if (hb.t.length > HMAX) { const cut = hb.t.length - HMAX; hb.t = hb.t.slice(cut); for (const k in hb.s) hb.s[k] = hb.s[k].slice(cut); }
+    }
+    st.hCur = { h, p: {} };
+  }
+  for (const [sym, d] of Object.entries(D.prices)) st.hCur.p[sym] = r7(d.price);
+}
+async function warmupHourly(D, need, st) {
+  const hb = D.hb, series = {}, now = Date.now();
+  let m; try { m = await krakenPairs(); } catch (_) { return 0; }
+  for (const sym of need.filter((x) => m[x]).slice(0, 25)) {
+    st.hTry[sym] = now;
+    try { const rows = await klinesKrakenH(sym); if (rows && rows.length) series[sym] = new Map(rows); } catch (_) { /* überspringen */ }
+  }
+  for (const sym of need.filter((x) => !m[x])) st.hTry[sym] = now + 24 * 3600e3; // gibt es bei Kraken nicht
+  const got = Object.keys(series); if (!got.length) return 0;
+  if (!hb.t.length) { let base = []; for (const x of got) { const ks = [...series[x].keys()]; if (ks.length > base.length) base = ks; } hb.t = base.slice(-HMAX); }
+  for (const x of got) { const old = hb.s[x] || []; hb.s[x] = hb.t.map((hh, i) => { const v = series[x].get(hh); return v == null ? (old[i] ?? null) : r7(v); }); }
+  for (const x of st.cfg.symbols) if (!hb.s[x]) hb.s[x] = hb.t.map(() => null);
+  return got.length;
+}
+function trendStep(D) {
+  const st = D.st, c = st.cfg, hNow = Math.floor(Date.now() / 3600000);
+  D.sig = {}; for (const sym of c.symbols) D.sig[sym] = trendSignal(hCloses(D.hb, sym), c);
+  const btc = D.sig.BTC; const marketOk = !btc || btc.p > btc.e50;
+  D.marketOk = marketOk;
+  // 1) Ausstiege: Trailing-Stop (live, jede Minute) oder Trendbruch (Stundenschluss unter 50er-Durchschnitt)
+  for (const sym of Object.keys(st.positions)) {
+    const pos = st.positions[sym], pr = D.prices[sym]; if (!pr) continue;
+    const p = pr.price, g = D.sig[sym]; pos.last = p; pos.peak = Math.max(pos.peak, p);
+    const sp = pos.stopPct || 0.05; pos.stop = Math.max(pos.stop || pos.avg * (1 - sp), pos.peak * (1 - sp));
+    const ch = p / pos.avg - 1; let r = null;
+    if (p <= pos.stop) r = pos.stop > pos.avg ? `Trailing-Stop: Gewinn gesichert (${pct(ch)})` : `Stop-Loss (${pct(ch)})`;
+    else if (g && g.p < g.e50) r = `Trend gebrochen: Stundenkurs unter dem 50-Stunden-Durchschnitt (${pct(ch)})`;
+    if (r) sell(D, sym, r);
+  }
+  if (st.paused || !marketOk) return;
+  // 2) Einstiege: stärkste Trends zuerst (Momentum im Verhältnis zur Schwankung)
+  const eq = equity(D);
+  const cands = Object.entries(D.sig).filter(([sym, g]) => g && g.buy && D.prices[sym] && !st.positions[sym]
+    && D.prices[sym].price >= g.e20 && (st.coolH?.[sym] || 0) <= hNow).sort((x, y) => y[1].z - x[1].z);
+  for (const [sym, g] of cands) {
+    if (Object.keys(st.positions).length >= c.maxPositions) break;
+    const budget = Math.min(eq / c.maxPositions, eq * c.maxPosPct / 100, st.cash);
+    if (budget < Math.max(10, eq * 0.02)) break;
+    buy(D, sym, budget, `Aufwärtstrend: +${nf(g.mom72 * 100, 1)} % in 3 Tagen, +${nf(g.mom24 * 100, 1)} % in 24 Std. · Trendstärke ${nf(g.z, 1)} · Stop ${nf(g.stopPct * 100, 1)} %`);
+    if (st.positions[sym]) { st.positions[sym].stopPct = g.stopPct; st.positions[sym].stop = D.prices[sym].price * (1 - g.stopPct); }
+  }
+}
+
+/* ================= Backtest mit echten Stundenkursen ================= */
+function runBacktest(grid, cfg, start = 500) {
+  // grid: { hours:[...], s:{sym:[close|null]} } – gleiche Regeln wie live, Entscheidung zum Stundenschluss
+  const syms = Object.keys(grid.s), T = grid.hours.length, f = cfg.fee / 100;
+  let cash = start, peakEq = start, maxDD = 0; const pos = {}, cool = {}; let trades = 0, wins = 0; const curve = [];
+  const at = (sym, i) => grid.s[sym][i];
+  for (let i = 80; i < T; i++) {
+    const sig = {}; for (const sym of syms) { const c = grid.s[sym].slice(Math.max(0, i - HMAX + 1), i + 1).filter((v) => v != null); sig[sym] = c.length >= 80 && at(sym, i) != null ? trendSignal(c, cfg) : null; }
+    for (const sym of Object.keys(pos)) {
+      const p = at(sym, i); if (p == null) continue; const q = pos[sym];
+      q.peak = Math.max(q.peak, p); q.stop = Math.max(q.stop, q.peak * (1 - q.sp));
+      if (p <= q.stop || (sig[sym] && p < sig[sym].e50)) {
+        const pnl = q.qty * p * (1 - f) - q.cost; cash += q.qty * p * (1 - f); trades++; if (pnl > 0) wins++; delete pos[sym]; cool[sym] = i + cfg.coolH;
+      }
+    }
+    const eqNow = cash + Object.entries(pos).reduce((a, [sym, q]) => a + q.qty * (at(sym, i) ?? q.peak), 0);
+    const btc = sig.BTC; if (!btc || btc.p > btc.e50) {
+      const cands = Object.entries(sig).filter(([sym, g]) => g && g.buy && !pos[sym] && (cool[sym] || 0) <= i).sort((a, b) => b[1].z - a[1].z);
+      for (const [sym, g] of cands) {
+        if (Object.keys(pos).length >= cfg.maxPositions) break;
+        const budget = Math.min(eqNow / cfg.maxPositions, eqNow * cfg.maxPosPct / 100, cash); if (budget < 10) break;
+        const p = at(sym, i); const qty = budget / (p * (1 + f)); cash -= qty * p * (1 + f);
+        pos[sym] = { qty, cost: qty * p * (1 + f), peak: p, sp: g.stopPct, stop: p * (1 - g.stopPct) };
+      }
+    }
+    const eqEnd = cash + Object.entries(pos).reduce((a, [sym, q]) => a + q.qty * (at(sym, i) ?? q.peak), 0);
+    peakEq = Math.max(peakEq, eqEnd); maxDD = Math.max(maxDD, 1 - eqEnd / peakEq); if (i % 6 === 0) curve.push(Math.round(eqEnd * 100) / 100);
+  }
+  const last = (sym) => { for (let i = T - 1; i >= 0; i--) if (grid.s[sym][i] != null) return grid.s[sym][i]; return null; };
+  const firstAt = (sym) => grid.s[sym][80];
+  const holdSyms = syms.filter((sym) => firstAt(sym) && last(sym));
+  const holdAll = holdSyms.reduce((a, sym) => a + (start / holdSyms.length) * (last(sym) / firstAt(sym)), 0);
+  const holdBtc = grid.s.BTC && firstAt("BTC") ? start * last("BTC") / firstAt("BTC") : null;
+  const final = cash + Object.entries(pos).reduce((a, [sym, q]) => a + q.qty * (last(sym) ?? q.peak), 0);
+  return { days: Math.round((T - 80) / 24), final: +final.toFixed(2), ret: +(final / start - 1).toFixed(4), trades, wins, maxDD: +maxDD.toFixed(4),
+    holdAll: +holdAll.toFixed(2), holdBtc: holdBtc && +holdBtc.toFixed(2), coins: syms.length, curve };
+}
+let btCache = null;
+async function backtestJson(url) {
+  if (btCache && Date.now() - btCache.t < 30 * 60000 && !url.searchParams.get("fresh")) return btCache.res;
+  const m = await krakenPairs();
+  const syms = ["BTC", ...DEF_CFG.symbols.filter((x) => x !== "BTC" && m[x])].slice(0, 40);
+  const series = {};
+  for (const sym of syms) {
+    try {
+      const r = await fetchT(`https://api.kraken.com/0/public/OHLC?pair=${m[sym].alt}&interval=60`);
+      if (!r.ok) continue; const j = await r.json(); const rows = j.result && (j.result[m[sym].key] || j.result[m[sym].alt]);
+      if (rows) series[sym] = new Map(rows.slice(0, -1).map((k) => [Math.floor(k[0] / 3600), +k[4]]));
+    } catch (_) { /* überspringen */ }
+  }
+  const hours = [...new Set(Object.values(series).flatMap((mm) => [...mm.keys()]))].sort((a, b) => a - b);
+  const grid = { hours, s: Object.fromEntries(Object.entries(series).map(([sym, mm]) => [sym, hours.map((hh) => mm.get(hh) ?? null)])) };
+  const base = { ...DEF_CFG };
+  const variants = [
+    { name: "Standard", cfg: base },
+    { name: "Vorsichtig (nur sehr starke Trends)", cfg: { ...base, minZ: 1.5 } },
+    { name: "Mutig (auch schwächere Trends)", cfg: { ...base, minZ: 0.5 } },
+    { name: "Enger Stop", cfg: { ...base, stopMult: 1.5 } },
+    { name: "Weiter Stop", cfg: { ...base, stopMult: 3.5 } },
+    { name: "3 Positionen", cfg: { ...base, maxPositions: 3, maxPosPct: 34 } },
+    { name: "8 Positionen", cfg: { ...base, maxPositions: 8, maxPosPct: 13 } },
+  ].map((v) => ({ name: v.name, ...runBacktest(grid, v.cfg) }));
+  const res = { ok: true, at: Date.now(), coins: Object.keys(series).length, hours: hours.length, variants };
+  btCache = { t: Date.now(), res }; return res;
+}
+
 function botStep(D) {
   const st = D.st, c = st.cfg, nowMin = D.bars.t[D.bars.t.length - 1] || 0, fee2 = 2 * c.fee / 100;
   st.sm = st.sm || {}; st.neg = st.neg || {};
@@ -412,11 +567,17 @@ async function tick(force = false) {
     // Verlauf für Coins ohne Daten nachladen (beim Start oder wenn neue Coins dazukommen)
     st.warmTry = st.warmTry || {};
     const need = syms.filter((x) => (D.bars.s[x] || []).filter((v) => v != null).length < WARM && now - (st.warmTry[x] || 0) > 30 * 60000);
-    if (need.length && now - (st.lastWarm || 0) > 50000) {
+    if (need.length && now - (st.lastWarm || 0) > 50000 && !(st.cfg.strategy === "trend" && syms.some((x) => hCloses(D.hb, x).length < 80 && now - ((st.hTry || {})[x] || 0) > 3 * 3600e3))) {
       st.lastWarm = now;
       const n = await warmup(D, need, syms, st);
       if (n) addLog(D, "INFO", { msg: `Kursverlauf der letzten 2 Stunden für ${n} Coins geladen – der Bot kann sie sofort bewerten.` });
       else if (!D.bars.t.length && !st.noHistLogged) { st.noHistLogged = true; addLog(D, "INFO", { msg: "Kein Kursverlauf verfügbar – der Bot sammelt jetzt 30 Minuten Daten, bevor er handelt." }); }
+    }
+    // Stunden-Verlauf für die Trend-Taktik nachladen (hat Vorrang, max. 25 Coins pro Runde)
+    st.hTry = st.hTry || {}; let hourlyBusy = false;
+    if (st.cfg.strategy === "trend") {
+      const needH = syms.filter((x) => hCloses(D.hb, x).length < 80 && now - (st.hTry[x] || 0) > 3 * 3600e3);
+      if (needH.length) { hourlyBusy = true; const n = await warmupHourly(D, needH, st); if (n) addLog(D, "INFO", { msg: `Stundenkurse der letzten ${HMAX / 24 | 0} Tage für ${n} Coins geladen.` }); }
     }
     // Aktuelle Kurse
     const pr = await fetchPrices(syms); D.prices = pr.data;
@@ -441,11 +602,16 @@ async function tick(force = false) {
     if (D.bars.t.length > MAXBARS) { const cut = D.bars.t.length - MAXBARS; D.bars.t = D.bars.t.slice(cut); for (const s in D.bars.s) D.bars.s[s] = D.bars.s[s].slice(cut); }
     // Bewerten und handeln
     D.an = {}; for (const s of syms) D.an[s] = pr.data[s] ? analyze(closesOf(D, s), st) : null;
-    botStep(D);
+    updateHourly(D, now);
+    if (st.cfg.strategy === "trend") trendStep(D); else botStep(D);
     D.eq.push([now, Math.round(equity(D) * 100) / 100]);
     dailyCheck(D);
-    st.lastRun = now; st.lastScores = Object.fromEntries(Object.entries(D.an).filter(([, a]) => a).map(([s, a]) => [s,
-      { score: +a.score.toFixed(3), trend: a.trend, rsi: +a.rsi.toFixed(1), pAI: +a.pAI.toFixed(3), ex: a.ex.map((e) => +e.toFixed(3)) }]));
+    st.lastRun = now; st.marketOk = D.marketOk !== false;
+    st.lastScores = Object.fromEntries(Object.entries(D.an).filter(([, a]) => a).map(([s, a]) => {
+      const g = D.sig && D.sig[s];
+      return [s, { score: +a.score.toFixed(3), trend: a.trend, rsi: +a.rsi.toFixed(1), pAI: +a.pAI.toFixed(3), ex: a.ex.map((e) => +e.toFixed(3)),
+        h: g ? { buy: g.buy, up: g.up, z: +g.z.toFixed(2), m24: +g.mom24.toFixed(4), m72: +g.mom72.toFixed(4) } : null }];
+    }));
     await saveAll(D);
     await deliver(D.notes);
     return { ok: true, src: pr.src, trades: D.notes.length };
@@ -467,6 +633,7 @@ async function stateJson() {
     cfg, cash: st.cash, equity: equity(D), positions: st.positions, trades: D.trades, log: D.log, eq: D.eq,
     W: st.W, acc: st.acc, learnSteps: st.learnSteps, stats: st.stats, notify: !!env("NTFY_TOPIC"), notifyErr: lastNotifyErr, notifyOk: lastNotifyOk, control: !!env("BOT_KEY"),
     bars: { t: b.t, s: b.s, ref: b.ref || {} }, scores: st.lastScores || {},
+    strategy: st.cfg.strategy, marketOk: st.marketOk !== false, hourlyReady: Object.values(D.hb.s).filter((a) => a.filter((v) => v != null).length >= 80).length,
     vapidPublic: (await vapid()).pub, pushDevices: ((await io.getMany(["push"])).push || []).length, pushErr: lastPushErr };
 }
 
@@ -522,6 +689,7 @@ async function handle(req) {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   try {
     if (url.pathname === "/api/state") return json(await stateJson());
+    if (url.pathname === "/api/backtest") return json(await backtestJson(url));
     if (url.pathname === "/api/notes") {
       const since = +url.searchParams.get("since") || 0;
       return json({ ok: true, notes: ((await io.getMany(["notes"])).notes || []).filter((n) => n.t > since).slice(-10) });

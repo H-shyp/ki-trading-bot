@@ -815,6 +815,11 @@ function scoreBar(s){
 }
 function signalTag(m){
   const c=S.cfg;
+  if(SRV.on && srvData){ const h=srvData.scores[m.sym]&&srvData.scores[m.sym].h;
+    if(S.positions[m.sym]) return '<span class="tag buy">IM DEPOT</span>';
+    if(!h) return `<span class="tag info">Lädt</span>`;
+    if(h.buy) return srvData.marketOk? '<span class="tag buy">KAUFSIGNAL</span>' : '<span class="tag warn">Crash-Schutz</span>';
+    return `<span class="tag hold">WARTEN</span>`; }
   if(!m.price) return '<span class="tag hold">Warte</span>';
   if(m.lastTs && Date.now()-m.lastTs>Math.max(60000,c.interval*12000)) return '<span class="tag warn">Keine Ticks</span>';
   if(!m.ready) return `<span class="tag info">Lernt ${Math.min(m.bars.length,WARM)}/${WARM}</span>`;
@@ -1113,6 +1118,8 @@ function renderSrv(){
   box.innerHTML=`<div class="stats" style="gap:8px 18px">
       <span>Letzte Runde <b class="num">${d.lastRun? 'vor '+dur(age) : 'noch keine'}</b></span>
       <span>Kursquelle <b>${esc(d.source||'–')}</b></span>
+      <span>Taktik <b>${d.cfg.mode==='dip'?'Buy the Dip':'Trendfolge'} (Stunden)</b></span>
+      <span>Markt <b class="${d.marketOk?'up':'down'}">${d.marketOk?'normal':'Crash-Schutz aktiv'}</b></span>
       <span>Takt <b>jede Minute</b></span>
       <span>Handy-Nachrichten <b class="${d.pushDevices?'up':'down'}">${d.pushDevices? 'an ('+d.pushDevices+' '+(d.pushDevices>1?'Geräte':'Gerät')+')' : 'aus'}</b></span>
       <span>Steuerung <b class="${SRV.key?'up':'mut'}">${SRV.key?'freigeschaltet':'nur ansehen'}</b></span></div>

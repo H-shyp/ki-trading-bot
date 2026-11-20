@@ -21,7 +21,7 @@ const CG = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin",
   APT: "aptos", INJ: "injective-protocol", FIL: "filecoin", TON: "the-open-network", XLM: "stellar", BCH: "bitcoin-cash",
   ETC: "ethereum-classic", HBAR: "hedera-hashgraph", AAVE: "aave", RENDER: "render-token", WIF: "dogwifcoin", BONK: "bonk",
   SEI: "sei-network", TIA: "celestia", ALGO: "algorand", VET: "vechain", ICP: "internet-computer", FET: "fetch-ai", TAO: "bittensor" };
-const DEF_CFG = { strategy: "trend", mode: "trend", dipRsi: 30, dipZ: 1.5, dipMaxH: 48, dipStop: 2.0, minZ: 1.0, stopMult: 2.5, coolH: 6, regime: "e50", exitRule: "e50", startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
+const DEF_CFG = { strategy: "trend", mode: "dip", dipRsi: 30, dipZ: 1.5, dipMaxH: 24, dipStop: 2.0, btcCrash: 0.03, minZ: 1.0, stopMult: 2.5, coolH: 6, regime: "e50", exitRule: "e50", startCash: 500, maxPosPct: 20, maxPositions: 5, sl: 2.5, tp: 5, trail: 1.5, fee: 0.1,
   buyTh: 0.3, sellTh: -0.25, trendFilter: true, minHoldMin: 20, confirmTicks: 3, cooldownMin: 30, maxHoldMin: 240, notifyBuys: false, notifySells: true, dailyHour: 21, symbols: SYMS_DEF };
 const EXPERTS = ["Trendfolger", "Momentum", "Mean-Reversion", "Breakout", "KI-Modell"];
 const H = 10, WARM = 30, WMAX = 0.4, MAXBARS = 120, ETA = 0.03, LR = 0.03, L2 = 1e-4;
@@ -67,15 +67,15 @@ async function loadAll() {
   if (s.cfgV >= 3 && s.cfgV < 4) {
     s.cfg.symbols = SYMS_DEF; s.cfg.maxPositions = DEF_CFG.maxPositions; s.cfg.maxPosPct = DEF_CFG.maxPosPct; s.cfg.buyTh = DEF_CFG.buyTh; s.cfgV = 4;
   }
-  if (s.cfgV >= 3 && s.cfgV < 5) { // Neue Taktik (Stunden-Trendfolge) + kompletter Neustart mit 500 $ (Wunsch vom 20.11.)
-    const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm };
-    const n = { ...freshState({ ...DEF_CFG }), ...keep, cfgV: 5 };
+  if (s.cfgV >= 3 && s.cfgV < 6) { // Neue Taktik „Buy the Dip“ (Backtest mit echten Kursen) + kompletter Neustart mit 500 $ (Wunsch vom 20.11.)
+    const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm, hTry: s.hTry, hCur: s.hCur };
+    const n = { ...freshState({ ...DEF_CFG }), ...keep, cfgV: 6 };
     return { st: n, hb, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
-      log: [{ t: Date.now(), type: "INFO", msg: "Neustart mit 500,00 $ und neuer Taktik: Trendfolge auf Stundenbasis mit Marktfilter." }] };
+      log: [{ t: Date.now(), type: "INFO", msg: "Neustart mit 500,00 $ und neuer Taktik „Buy the Dip“: kauft stark überverkaufte Coins und verkauft beim Zurückspringen (max. 24 Std.)." }] };
   }
   if (s.cfgV < 3) { // Neustart mit 500 $ Spielgeld (Wunsch vom 19.11.); das Gelernte der KI bleibt
     const keep = { W: s.W, acc: s.acc, ai: s.ai, learnSteps: s.learnSteps, lastRun: s.lastRun, source: s.source, lastWarm: s.lastWarm };
-    const n = { ...freshState({ ...DEF_CFG }), ...keep, cfgV: 5 };
+    const n = { ...freshState({ ...DEF_CFG }), ...keep, cfgV: 6 };
     return { st: n, hb, bars: v.bars || { t: [], s: {}, ref: {} }, trades: [], eq: [],
       log: [{ t: Date.now(), type: "INFO", msg: "Neues Depot mit 500,00 $ Spielgeld gestartet. Das Gelernte der KI bleibt erhalten." }] };
   }
@@ -363,30 +363,38 @@ function exitSignal(g, cfg, heldH) {
   return trendBroken(g, cfg);
 }
 function trendStep(D) {
-  const st = D.st, c = st.cfg, hNow = Math.floor(Date.now() / 3600000);
+  const st = D.st, c = st.cfg, hNow = Math.floor(Date.now() / 3600000), dip = c.mode === "dip";
   D.sig = {}; for (const sym of c.symbols) D.sig[sym] = trendSignal(hCloses(D.hb, sym), c);
-  const mOk = marketOk(D.sig.BTC, c); D.marketOk = mOk;
-  // 1) Ausstiege: Trailing-Stop (live, jede Minute) oder Trendbruch (Stundenschluss unter 50er-Durchschnitt)
+  const btc = D.sig.BTC;
+  const mOk = dip ? !(btc && btc.mom24 < -c.btcCrash) : marketOk(btc, c); D.marketOk = mOk;
+  // 1) Ausstiege
   for (const sym of Object.keys(st.positions)) {
     const pos = st.positions[sym], pr = D.prices[sym]; if (!pr) continue;
     const p = pr.price, g = D.sig[sym]; pos.last = p; pos.peak = Math.max(pos.peak, p);
-    const sp = pos.stopPct || 0.05; pos.stop = Math.max(pos.stop || pos.avg * (1 - sp), pos.peak * (1 - sp));
-    const ch = p / pos.avg - 1; let r = null;
+    const sp = pos.stopPct || 0.05, ch = p / pos.avg - 1, heldH = (Date.now() - pos.t) / 3600e3; let r = null;
+    if (!dip) pos.stop = Math.max(pos.stop || pos.avg * (1 - sp), pos.peak * (1 - sp)); else pos.stop = pos.stop || pos.avg * (1 - sp);
     if (p <= pos.stop) r = pos.stop > pos.avg ? `Trailing-Stop: Gewinn gesichert (${pct(ch)})` : `Stop-Loss (${pct(ch)})`;
-    else if (trendBroken(g, c)) r = `Trend gebrochen (${pct(ch)})`;
+    else if (dip && g && g.p >= g.e20 && hNow > Math.floor(pos.t / 3600000)) r = `Kurs ist zurück auf seinem Durchschnitt – Gewinn mitnehmen (${pct(ch)})`;
+    else if (dip && heldH >= c.dipMaxH) r = `${c.dipMaxH} Std. ohne Erholung – Position wird geschlossen (${pct(ch)})`;
+    else if (!dip && trendBroken(g, c)) r = `Trend gebrochen (${pct(ch)})`;
     if (r) sell(D, sym, r);
   }
   if (st.paused || !mOk) return;
-  // 2) Einstiege: stärkste Trends zuerst (Momentum im Verhältnis zur Schwankung)
+  // 2) Einstiege
   const eq = equity(D);
-  const cands = Object.entries(D.sig).filter(([sym, g]) => g && g.buy && D.prices[sym] && !st.positions[sym]
-    && D.prices[sym].price >= g.e20 && (st.coolH?.[sym] || 0) <= hNow).sort((x, y) => y[1].z - x[1].z);
+  const cands = Object.entries(D.sig).filter(([sym, g]) => entrySignal(g, c) && D.prices[sym] && !st.positions[sym]
+    && (dip ? D.prices[sym].price < g.e20 : D.prices[sym].price >= g.e20) && (st.coolH?.[sym] || 0) <= hNow)
+    .sort((x, y) => (dip ? x[1].dipZ - y[1].dipZ : y[1].z - x[1].z));
   for (const [sym, g] of cands) {
     if (Object.keys(st.positions).length >= c.maxPositions) break;
     const budget = Math.min(eq / c.maxPositions, eq * c.maxPosPct / 100, st.cash);
     if (budget < Math.max(10, eq * 0.02)) break;
-    buy(D, sym, budget, `Aufwärtstrend: +${nf(g.mom72 * 100, 1)} % in 3 Tagen, +${nf(g.mom24 * 100, 1)} % in 24 Std. · Trendstärke ${nf(g.z, 1)} · Stop ${nf(g.stopPct * 100, 1)} %`);
-    if (st.positions[sym]) { st.positions[sym].stopPct = g.stopPct; st.positions[sym].stop = D.prices[sym].price * (1 - g.stopPct); }
+    const sp = dip ? clamp(c.dipStop * g.vol * Math.sqrt(6), 0.02, 0.10) : g.stopPct;
+    const why = dip
+      ? `Überverkauft: RSI ${nf(g.rsi, 0)}, ${nf((1 - g.p / g.e20) * 100, 1)} % unter dem Durchschnitt · Ziel: zurück auf ${fp(g.e20)} $ · Stop ${nf(sp * 100, 1)} %`
+      : `Aufwärtstrend: +${nf(g.mom72 * 100, 1)} % in 3 Tagen, +${nf(g.mom24 * 100, 1)} % in 24 Std. · Trendstärke ${nf(g.z, 1)} · Stop ${nf(sp * 100, 1)} %`;
+    buy(D, sym, budget, why);
+    if (st.positions[sym]) { st.positions[sym].stopPct = sp; st.positions[sym].stop = D.prices[sym].price * (1 - sp); st.positions[sym].target = g.e20; }
   }
 }
 
@@ -637,7 +645,7 @@ async function tick(force = false) {
     st.lastScores = Object.fromEntries(Object.entries(D.an).filter(([, a]) => a).map(([s, a]) => {
       const g = D.sig && D.sig[s];
       return [s, { score: +a.score.toFixed(3), trend: a.trend, rsi: +a.rsi.toFixed(1), pAI: +a.pAI.toFixed(3), ex: a.ex.map((e) => +e.toFixed(3)),
-        h: g ? { buy: g.buy, up: g.up, z: +g.z.toFixed(2), m24: +g.mom24.toFixed(4), m72: +g.mom72.toFixed(4) } : null }];
+        h: g ? { buy: entrySignal(g, st.cfg), up: g.up, z: +g.z.toFixed(2), rsi: +g.rsi.toFixed(0), dz: +g.dipZ.toFixed(2), m24: +g.mom24.toFixed(4), m72: +g.mom72.toFixed(4) } : null }];
     }));
     await saveAll(D);
     await deliver(D.notes);
